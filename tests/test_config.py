@@ -122,6 +122,10 @@ def test_partial_file_gets_defaults_merged(tmp_path: Path) -> None:
         ({"panel": {"refresh_floor_seconds": 120.5}}, "whole number"),
         ({"panel": {"keepalive_hours": 24}}, "panel.keepalive_hours"),
         ({"panel": {"show_now_min_seconds": 600}}, "must not exceed"),
+        (
+            {"panel": {"refresh_floor_seconds": 7200, "keepalive_hours": 1}},
+            r"refresh_floor_seconds \(7200\) must not exceed panel.keepalive_hours",
+        ),
         ({"display": {"rotation": 180}}, "display.rotation"),
         ({"display": {"clear_before_refresh": "yes"}}, "true or false"),
         ({"quiet_hours": {"start": "25:00"}}, "quiet_hours.start"),
