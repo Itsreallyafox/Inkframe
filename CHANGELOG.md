@@ -2,6 +2,78 @@
 
 All notable changes to Inkframe. One entry per build phase; dates are UTC.
 
+## 0.1.0 — Phase 6: scheduler (2026-10-19)
+
+- `inkframe.scheduler.Scheduler`, the only thing that drives the panel. It
+  enforces the panel-care rules in code:
+  - the refresh floor, measured from the end of the last attempt (failed
+    attempts count);
+  - show-now, the one bypass of the floor, which still waits
+    `show_now_min_seconds`; one pending request, a newer one replaces it, and
+    `fires_at` is reported for the UI countdown;
+  - a keep-alive that re-shows the last frame byte for byte while paused or in
+    quiet hours;
+  - `init -> [clear] -> show -> sleep` with `sleep()` in a `finally`;
+  - quiet hours, as windows that start on the listed weekdays and may cross
+    midnight;
+  - render failures skipped slot by slot, with a 60 s backoff when every slot
+    fails. A timed-out render is cancelled, or, while it still runs, later
+    renders fail at once instead of queueing behind it. A photo list that
+    cannot be read fails the photos slot the same way instead of stopping
+    every refresh, the keep-alive included;
+  - display failures logged and counted as attempts. The last good frame is
+    written back to disk after a failed refresh, and the panel counts as
+    stale, so the next rotation change repaints even the same photo;
+  - every rendered frame validated before the panel is touched (an invalid
+    frame from the dither path is a render failure, not a panel failure),
+    and a render raising `SystemExit` skipped like any other failure instead
+    of ending the scheduler thread.
+
+  Its decision core `tick(now)` returns the next delay. It runs on a daemon
+  thread that `wake()` interrupts.
+- Photos slot: dwell (default 3 min), shuffle (avoids the last
+  `min(n - 1, 20)`) or sequential (`created_at` order), and a "no photos" card
+  that lasts one dwell. A photo change that would push the slot past its end
+  is skipped, and an identical photo is never re-shown.
+- State survives restart. It is stored under the db key `scheduler`, mirrored
+  to `last_refresh_at`/`last_source`, with the frame in
+  `last_frame.bin`/`.png`. That covers the rotation position, timing anchors,
+  recent photos and the frame to keep alive. Unreadable state, even a row
+  that is not JSON, gives defaults instead of stopping the boot, and
+  `/api/status` reports it as unknown instead of failing. A lost attempt
+  anchor falls back to the last refresh, so the floor survives it.
+- Settings: `panel.refresh_floor_seconds` may not exceed
+  `panel.keepalive_hours`, since a longer floor would hold the keep-alive
+  back.
+- Shutdown waits up to 100 s for a refresh in flight (not for a render), and
+  leaves the display to a refresh that is still running; the systemd unit's
+  `TimeoutStopSec` is now 150 s. `Scheduler.invalidate()` lets Phase 3
+  repaint a photo whose recipe changed.
+- Clock safety for a Pi without an RTC. The floor and the show-now minimum are
+  measured on the wall clock and the monotonic clock, so no clock step
+  shortens them. Wall-clock jumps are detected against the monotonic clock and
+  the timers shifted. Anchors loaded from disk move only in their safe
+  direction, so NTP's first step after a power cut never postpones the
+  keep-alive. Anchors found in the future after a restart are clamped. A
+  DST-aware `now_fn` is handled at its offset of the moment.
+- API: `POST /api/display/next|pause|resume|show`, `GET/PUT /api/rotation`,
+  `GET /api/apps`, `GET/PUT /api/apps/{id}/settings` and
+  `GET /api/apps/{id}/preview.png`. Previews run on the render executor, never
+  the panel. `/api/status` keeps its Phase 1 keys and adds
+  `panel.last_attempt_at`, `panel.last_error`, `rotation.quiet`,
+  `rotation.quiet_until` and `rotation.pending`; it also fills `current`,
+  `next`, `next_at` and `keepalive_at`.
+- `create_app(scheduler=False)` and `INKFRAME_SCHEDULER=off` build the
+  scheduler without starting its thread. `INKFRAME_OFFLINE=1` makes scheduler
+  and preview renders offline. Shutdown stops the scheduler before the
+  display. An app that fails to import is logged and skipped instead of
+  stopping the frame from booting.
+- `inkframe/apps/photos.py`: a stub photos app (a "no photos" card and a
+  placeholder per photo) that Phase 3 replaces.
+- Fake-clock tests for every rule (`tests/test_scheduler.py`,
+  `tests/test_quiet_hours.py`) and API tests (`tests/test_api_display.py`,
+  `tests/test_api_apps.py`). Design notes are in `docs/SCHEDULER.md`.
+
 ## 0.1.0 — Phase 1: scaffold and display layer (2026-10-19)
 
 - Repository layout, LF normalisation, Python 3.10/3.13-compatible package.

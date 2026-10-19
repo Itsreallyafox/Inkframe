@@ -221,7 +221,7 @@ class DisplaySettings:
 class PanelSettings:
     """Panel-care timing (plan section 2)."""
 
-    #: minimum time between scheduled refreshes
+    #: minimum time between scheduled refreshes (at most ``keepalive_hours``)
     refresh_floor_seconds: int = 180
     #: "show now" may bypass the floor but never refreshes faster than this
     show_now_min_seconds: int = 30
@@ -247,6 +247,12 @@ class PanelSettings:
                 f"panel.refresh_floor_seconds ({floor})"
             )
         keepalive = _int("panel.keepalive_hours", self.keepalive_hours, 1, MAX_KEEPALIVE_HOURS)
+        if floor > keepalive * 3600:
+            # the keep-alive is a refresh too: a longer floor would hold it back
+            raise ValueError(
+                f"panel.refresh_floor_seconds ({floor}) must not exceed "
+                f"panel.keepalive_hours ({keepalive} h = {keepalive * 3600} s)"
+            )
         object.__setattr__(self, "refresh_floor_seconds", floor)
         object.__setattr__(self, "show_now_min_seconds", show_now)
         object.__setattr__(self, "keepalive_hours", keepalive)

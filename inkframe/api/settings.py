@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 
 from inkframe.api import SettingsDep
 
@@ -18,14 +18,21 @@ def read_settings(store: SettingsDep) -> dict[str, Any]:
 
 
 @router.put("/settings")
-def update_settings(patch: Annotated[dict[str, Any], Body()], store: SettingsDep) -> dict[str, Any]:
+def update_settings(
+    patch: Annotated[dict[str, Any], Body()], request: Request, store: SettingsDep
+) -> dict[str, Any]:
     """Deep-merge a full or partial settings object over the current settings
     and return the saved result.
 
     Nested objects merge key by key; lists (``rotation``, ``quiet_hours.days``)
     are replaced whole.  Unknown keys or invalid values: 422 with the reason.
+    The scheduler is woken so a new floor, quiet window or rotation applies now.
     """
     try:
-        return store.patch(patch).to_dict()
+        saved = store.patch(patch).to_dict()
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is not None:
+        scheduler.wake()
+    return saved

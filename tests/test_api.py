@@ -18,6 +18,7 @@ from inkframe.config import SettingsStore
 from inkframe.display import factory
 from inkframe.display.base import DisplayError
 from inkframe.display.mock import MockDisplay, read_last_frame
+from inkframe.scheduler import Scheduler
 from tests.conftest import stripes_frame
 
 
@@ -43,10 +44,33 @@ def test_status_shape(client: TestClient, data_dir: Path) -> None:
     assert set(s) == {"version", "display", "panel", "rotation", "settings", "system"}
     assert isinstance(s["version"], str)
     assert s["display"] == {"kind": "mock", "width": 600, "height": 400, "awake": False}
-    assert set(s["panel"]) == {"state", "last_refresh_at", "last_source"}
-    assert s["panel"] == {"state": "asleep", "last_refresh_at": None, "last_source": None}
-    assert set(s["rotation"]) == {"paused", "current", "next", "next_at", "keepalive_at"}
+    # Phase 1 keys plus the scheduler's (Phase 6); nothing was refreshed yet
+    assert set(s["panel"]) == {
+        "state",
+        "last_refresh_at",
+        "last_attempt_at",
+        "last_source",
+        "last_error",
+    }
+    assert s["panel"] == {
+        "state": "asleep",
+        "last_refresh_at": None,
+        "last_attempt_at": None,
+        "last_source": None,
+        "last_error": None,
+    }
+    assert set(s["rotation"]) == {
+        "paused",
+        "quiet",
+        "quiet_until",
+        "current",
+        "next",
+        "next_at",
+        "keepalive_at",
+        "pending",
+    }
     assert s["rotation"]["paused"] is False
+    assert s["rotation"]["current"] is None and s["rotation"]["pending"] is None
     assert set(s["settings"]) == {
         "refresh_floor_seconds",
         "keepalive_hours",
@@ -206,7 +230,10 @@ def test_lifespan_state_and_shutdown(data_dir: Path) -> None:
     app = create_app(data_dir=data_dir, display=display)
     with TestClient(app):
         state = app.state
-        assert state.display is display and state.scheduler is None
+        assert state.display is display
+        # INKFRAME_SCHEDULER=off (conftest): the scheduler exists, its thread does not run
+        assert isinstance(state.scheduler, Scheduler) and not state.scheduler.running
+        assert set(state.apps) == {"photos", "weather", "headlines", "patterns", "quotes"}
         assert state.render_executor.submit(lambda: 41 + 1).result(timeout=5) == 42
         assert isinstance(state.started_at, datetime) and state.started_at.tzinfo is not None
         for sub in ("masters", "renders", "cache"):

@@ -29,10 +29,12 @@ RestartSec=3
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-# a ~19 s panel refresh may be in flight when the stop arrives; the app
-# sleeps the panel on shutdown
+# a panel refresh may be in flight when the stop arrives (~19 s, about 40 s
+# with clear_before_refresh); the app lets it finish (up to 100 s,
+# SCHEDULER_STOP_TIMEOUT in inkframe/app.py) and sleeps the panel, so give
+# it well over that before SIGKILL
 KillSignal=SIGTERM
-TimeoutStopSec=40
+TimeoutStopSec=150
 # Crash safety net: if the process dies without its own power-down path
 # (SIGKILL, OOM), a released GPIO line keeps its last level and the HAT's
 # 5 V rail (BCM18 = PWR) could stay on.  Drive RST (17), PWR (18) and DC (25)
