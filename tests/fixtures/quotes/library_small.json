@@ -1,0 +1,11 @@
+{
+  "quotes": [
+    {"text": "Earth laughs in flowers.", "author": "Ralph Waldo Emerson", "source": "Hamatreya, 1847", "tags": ["nature"]},
+    {"text": "Fortune favours the bold.", "author": "Virgil", "source": "Aeneid X", "tags": ["courage"]},
+    {"text": "Brevity is the soul of wit.", "author": "William Shakespeare", "source": "Hamlet", "tags": ["humour", "art"]},
+    {"text": "Confine thyself to the present.", "author": "Marcus Aurelius", "source": "Meditations VII.29", "tags": ["stoic", "time"]},
+    {"text": "  Hunger   is the best pickle. ", "author": " Benjamin  Franklin. ", "source": "Poor Richard’s Almanack, 1750", "tags": ["humour", "HUMOR", "nonsense"]},
+    {"text": "", "author": "Nobody", "source": "", "tags": []},
+    {"text": "Fortune favours the bold.", "author": "Virgil", "source": "a duplicate", "tags": ["courage"]}
+  ]
+}
