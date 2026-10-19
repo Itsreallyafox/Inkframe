@@ -31,3 +31,6 @@ scratch/
 *.exp
 *.lib
 *.pdb
+
+# Claude Code session worktrees
+.claude/
