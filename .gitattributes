@@ -1,0 +1,20 @@
+# Normalize line endings: everything is LF in the repo and on checkout.
+# Shell scripts, the systemd unit and the post-receive hook must never reach the Pi with CRLF.
+* text=auto eol=lf
+
+# Windows-only scripts may keep CRLF on checkout
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.heic binary
+*.npy binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.so binary
+*.db binary
