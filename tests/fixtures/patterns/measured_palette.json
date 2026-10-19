@@ -1,0 +1,11 @@
+{
+  "name": "fixture: a panel measured on a cold morning",
+  "colors": {
+    "black": [30, 28, 33],
+    "white": [210, 212, 200],
+    "yellow": [214, 180, 40],
+    "red": [170, 40, 36],
+    "blue": [30, 50, 118],
+    "green": [44, 110, 76]
+  }
+}
