@@ -24,3 +24,10 @@ Thumbs.db
 
 # scratch
 scratch/
+
+# native build artefacts (desktop MSVC / Pi gcc)
+*.dll
+*.obj
+*.exp
+*.lib
+*.pdb
