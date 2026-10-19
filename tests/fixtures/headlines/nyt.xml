@@ -1,0 +1,331 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:nyt="http://www.nytimes.com/namespaces/rss/2.0" version="2.0">
+  <channel>
+    <title>NYT &gt; Top Stories</title>
+    <link>https://www.nytimes.com</link>
+    <atom:link href="https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml" rel="self" type="application/rss+xml"></atom:link>
+    <description></description>
+    <language>en-us</language>
+    <copyright>Copyright 2026 The New York Times Company</copyright>
+    <lastBuildDate>Mon, 19 Oct 2026 18:55:51 +0000</lastBuildDate>
+    <pubDate>Mon, 19 Oct 2026 18:54:34 +0000</pubDate>
+    <image>
+      <title>NYT &gt; Top Stories</title>
+      <url>https://static01.nyt.com/images/misc/NYT_logo_rss_250x40.png</url>
+      <link>https://www.nytimes.com</link>
+    </image>
+    <item>
+      <title>France Officials Acknowledge ‘Failure’ Around Riots</title>
+      <link>https://www.nytimes.com/2026/10/19/world/europe/france-protests-riots.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/europe/france-protests-riots.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/europe/france-protests-riots.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Catherine Porter and Ségolène Le Stradic</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 15:29:09 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">France</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Curfews</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Demonstrations, Protests and Riots</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Politics and Government</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Darmanin, Gerald</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Macron, Emmanuel (1977- )</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Nunez, Laurent</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Marseille (France)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Paris (France)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Nice (France)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Lille (France)</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19int-france-protests-hpjv/19int-france-protests-hpjv-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Carl Court/Getty Images</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>The French Teen Maimed During School Unrest by Tear Gas Grenade</title>
+      <link>https://www.nytimes.com/2026/10/19/world/europe/france-protests-violence-police-response.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/europe/france-protests-violence-police-response.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/europe/france-protests-violence-police-response.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Ségolène Le Stradic</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 17:50:36 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">France</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Demonstrations, Protests and Riots</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Police</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Tear Gas</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Assaults</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Education (Secondary)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Teachers and School Employees</category>
+    </item>
+    <item>
+      <title>Why Are There Protests in France?</title>
+      <link>https://www.nytimes.com/article/france-student-protests-why.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/article/france-student-protests-why.html</guid>
+      <atom:link href="https://www.nytimes.com/article/france-student-protests-why.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Amelia Nierenberg and Catherine Porter</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 18:53:42 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Education (K-12)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Demonstrations, Protests and Riots</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Teachers and School Employees</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Shortages</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Teenagers and Adolescence</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Budgets and Budgeting</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Politics and Government</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">France</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">St Denis (France)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Macron, Emmanuel (1977- )</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/11/03/multimedia/03int-france-schools-wtk-vphk/03int-france-schools-wtk-vphk-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Jeff Pachoud/Agence France-Presse — Getty Images</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>Republicans Barely Mention Trump in Political Ads Ahead of the Midterms</title>
+      <link>https://www.nytimes.com/2026/10/19/us/politics/trump-midterms-republican-political-ads.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/us/politics/trump-midterms-republican-political-ads.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/us/politics/trump-midterms-republican-political-ads.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Bayliss Wagner</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 18:41:55 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">United States Politics and Government</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Political Advertising</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Midterm Elections (2026)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Democratic Party</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Republican Party</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Trump, Donald J</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19pol-midterm-ads-trump-vmbf/19pol-midterm-ads-trump-vmbf-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Kenny Holston/The New York Times</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>How a Trillion-Dollar Industry Launders Illegal Gold</title>
+      <link>https://www.nytimes.com/2026/10/19/world/africa/dirty-gold-industry-coverup-launder-madagascar.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/africa/dirty-gold-industry-coverup-launder-madagascar.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/africa/dirty-gold-industry-coverup-launder-madagascar.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Justin Scheck and Lynsey Addario</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 13:33:10 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">vis-photo</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Metals and Minerals</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Mines and Mining</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Child Labor</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Gold</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Human Rights and Human Rights Violations</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Madagascar</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Refineries</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Organized Crime</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/09/25/multimedia/00int-dirty-gold-promo-new-bfvg/00int-dirty-gold-promo-new-bfvg-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Lynsey Addario for The New York Times</media:credit>
+    </item>
+    <item>
+      <title>To Find Criminals and Child Exploitation in Gold Mines, We Just Had to Look</title>
+      <link>https://www.nytimes.com/2026/10/19/world/africa/gold-mines-investigation-takeaways.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/africa/gold-mines-investigation-takeaways.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/africa/gold-mines-investigation-takeaways.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Justin Scheck</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 10:59:55 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Gold</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Metals and Minerals</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Human Rights and Human Rights Violations</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Supply Chain</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Bank of England</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Madagascar</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Papua New Guinea</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Colombia</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Waste Materials and Disposal</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Child Labor</category>
+      <media:content height="1799" medium="image" url="https://static01.nyt.com/images/2026/10/16/multimedia/00int-dirty-gold-takeaways-1-tpvl/00int-dirty-gold-takeaways-1-tpvl-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Lynsey Addario for The New York Times</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>Trump Golf Course Dispute Sparks Clash Between Judge and DOJ</title>
+      <link>https://www.nytimes.com/2026/10/19/us/politics/trump-washington-golf-course.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/us/politics/trump-washington-golf-course.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/us/politics/trump-washington-golf-course.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Zach Montague</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 17:16:42 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">United States Politics and Government</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Suits and Litigation (Civil)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Federal Courts (US)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Courts and the Judiciary</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Trees and Shrubs</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Interior Department</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Justice Department</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Biden, Joseph R Jr</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Reyes, Ana C</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Trump, Donald J</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19dc-golf-lpbk/19dc-golf-lpbk-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Kenny Holston/The New York Times</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>How Did Life Arise? Three Turning Points in Early Evolution</title>
+      <link>https://www.nytimes.com/2026/10/19/science/evolution-life-earth.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/science/evolution-life-earth.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/science/evolution-life-earth.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>William J. Broad, Kenneth Chang and Carl Zimmer</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 12:56:26 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Paleontology</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Earth</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Oceans and Seas</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Biology and Biochemistry</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Evolution (Biology)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Fish and Other Marine Life</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Animals</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Fossils</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Volcanoes</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Mitochondria</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">DNA (Deoxyribonucleic Acid)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Darwin (Australia)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Newfoundland (Canada)</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19SCI-UNKNOWNS-ORIGINS-top-gbkw/19SCI-UNKNOWNS-ORIGINS-top-gbkw-mediumSquareAt3X-v2.jpg" width="1800"></media:content>
+      <media:credit>Photoillustration by Will Warasila for The New York Times</media:credit>
+    </item>
+    <item>
+      <title>Trump Is Pushing Ukraine to Surrender to Russia, Zelensky Says</title>
+      <link>https://www.nytimes.com/2026/10/19/world/europe/trump-zelensky-putin-ukraine-war.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/europe/trump-zelensky-putin-ukraine-war.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/europe/trump-zelensky-putin-ukraine-war.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Constant Méheut</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 12:39:50 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Russian Invasion of Ukraine (2022)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">United States Politics and Government</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">United States International Relations</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Putin, Vladimir V</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Trump, Donald J</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Xi Jinping</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Zelensky, Volodymyr</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Russia</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">United States</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Ukraine</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19int-zelensky-trump-01-kwtp/19int-zelensky-trump-01-kwtp-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Efrem Lukatsky/Associated Press</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>Fire at Starlink Center in Lithuania Was Sabotage, Officials Say</title>
+      <link>https://www.nytimes.com/2026/10/19/world/europe/lithuania-starlink-sabotage-ukraine-russia.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/europe/lithuania-starlink-sabotage-ukraine-russia.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/europe/lithuania-starlink-sabotage-ukraine-russia.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Lara Jakes</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 18:33:39 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Lithuania</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Starlink Satellite Constellation (SpaceX)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Europe</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Bulgaria</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Poland</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Ukraine</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Russia</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">North Atlantic Treaty Organization</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Musk, Elon</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Trump, Donald J</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Sinkevicius, Mindaugas</category>
+      <media:content height="1798" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19int-lithuania-starlink-jpcg/19int-lithuania-starlink-jpcg-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Inna Varenytsia/Reuters</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>Saudi Arabia Postpones Its FII Investment Event After Houthi Attacks</title>
+      <link>https://www.nytimes.com/2026/10/19/business/saudi-investment-fii-houthis.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/business/saudi-investment-fii-houthis.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/business/saudi-investment-fii-houthis.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Humza Jilani</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 18:21:01 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Oil (Petroleum) and Gasoline</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">War and Armed Conflicts</category>
+      <category domain="">Future Investment Initiative</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Airports</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Saudi Arabia</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Riyadh (Saudi Arabia)</category>
+      <media:content height="1800" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19biz-saudi-investment-ktlm/19biz-saudi-investment-ktlm-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Fayez Nureldine/Agence France-Presse — Getty Images</media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>Houthi Strikes Kill Dozens in Yemeni Desert Military Camp, Officials Say</title>
+      <link>https://www.nytimes.com/2026/10/19/world/middleeast/houthis-strike-yemen-military-camp.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/world/middleeast/houthis-strike-yemen-military-camp.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/world/middleeast/houthis-strike-yemen-military-camp.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Saeed Al-Batati and Ismaeel Naar</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 18:47:21 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Houthis</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Yemen</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">War and Armed Conflicts</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Deaths (Fatalities)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Saudi Arabia</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Missiles and Missile Defense Systems</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Iran</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Defense and Military Forces</category>
+      <media:content height="1365" medium="image" url="https://static01.nyt.com/images/2026/10/19/world/Yemen-strike/Yemen-strike-mediumSquareAt3X.jpg" width="1365"></media:content>
+      <media:credit>Social Media, via Reuters </media:credit>
+      <media:description></media:description>
+    </item>
+    <item>
+      <title>How Penélope Cruz Masterminded One of the Most Versatile Careers in Hollywood</title>
+      <link>https://www.nytimes.com/2026/10/19/magazine/penelope-cruz-acting-career.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/magazine/penelope-cruz-acting-career.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/magazine/penelope-cruz-acting-career.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Marcela Valdes</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 11:14:52 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Cruz, Penelope</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_ttl">La Bola Negra (Movie)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_ttl">The Invite (Movie)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Movies</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Almodovar, Pedro</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_per">Cuaron, Alfonso</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Madrid (Spain)</category>
+      <media:content height="1799" medium="image" url="https://static01.nyt.com/images/2026/11/01/magazine/01mag-cruz-02/01mag-cruz-02-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Paul Kooiker for The New York Times</media:credit>
+    </item>
+    <item>
+      <title>The Overlapping Plagues Quietly Devastating American Forests</title>
+      <link>https://www.nytimes.com/2026/10/19/climate/tree-pandemics-northeast-forests.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/climate/tree-pandemics-northeast-forests.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/climate/tree-pandemics-northeast-forests.html" rel="standout"></atom:link>
+      <description></description>
+      <pubDate>Mon, 19 Oct 2026 15:55:37 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Trees and Shrubs</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Invasive Species</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Global Warming</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">New York State</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Catskill Mountains</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Hudson River Valley (NY)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">Northeastern States (US)</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">North America</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_org">Forest Service</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Forests and Forestry</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Wildlife Die-Offs</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Insects</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Flowers and Plants</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">International Trade and World Market</category>
+      <media:content height="1801" medium="image" url="https://static01.nyt.com/images/2026/10/16/multimedia/19CLI-TREE-PLAGUES-stillpromo/19CLI-TREE-PLAGUES-stillpromo-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Maddie McGarvey for The New York Times</media:credit>
+    </item>
+    <item>
+      <title>Latest Climate Report Warns of Major Upheaval to California Way of Life</title>
+      <link>https://www.nytimes.com/2026/10/19/us/california-climate-change-warning.html</link>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/10/19/us/california-climate-change-warning.html</guid>
+      <atom:link href="https://www.nytimes.com/2026/10/19/us/california-climate-change-warning.html" rel="standout"></atom:link>
+      <description></description>
+      <dc:creator>Soumya Karlamangla</dc:creator>
+      <pubDate>Mon, 19 Oct 2026 17:09:20 +0000</pubDate>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Wildfires</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Floods</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Global Warming</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Weather</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Agriculture and Farming</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Drought</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Environment</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/des">Greenhouse Gas Emissions</category>
+      <category domain="http://www.nytimes.com/namespaces/keywords/nyt_geo">California</category>
+      <media:content height="1801" medium="image" url="https://static01.nyt.com/images/2026/10/19/multimedia/19nat-ca-climate-kfvm/19nat-ca-climate-kfvm-mediumSquareAt3X.jpg" width="1800"></media:content>
+      <media:credit>Mario Tama/Getty Images</media:credit>
+      <media:description></media:description>
+    </item>
+    </channel>
+</rss>

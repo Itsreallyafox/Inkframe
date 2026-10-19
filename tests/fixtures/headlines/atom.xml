@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hand-written Atom feed exercising title normalisation and story selection.
+     Test clock: 2026-10-19T19:00:00Z. -->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Wire - Top Stories</title>
+  <id>urn:example:wire</id>
+  <updated>2026-10-19T18:30:00Z</updated>
+  <link href="https://wire.example.org/"/>
+  <entry>
+    <title>Markets rally as central bank holds rates steady - Reuters</title>
+    <id>urn:example:1</id>
+    <link href="https://wire.example.org/markets-rally"/>
+    <updated>2026-10-19T18:30:00Z</updated>
+  </entry>
+  <entry>
+    <title type="html">Q&amp;amp;A: what&amp;#8217;s next for the &amp;quot;harbour deal&amp;quot;</title>
+    <id>urn:example:2</id>
+    <link href="https://wire.example.org/qa"/>
+    <updated>2026-10-19T16:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Watch: Volcano erupts on remote island</title>
+    <id>urn:example:3</id>
+    <link href="https://wire.example.org/video-volcano"/>
+    <updated>2026-10-19T18:50:00Z</updated>
+  </entry>
+  <entry>
+    <title type="html">Storm   batters
+      the coast as &lt;b&gt;thousands&lt;/b&gt; lose power</title>
+    <id>urn:example:4</id>
+    <link href="https://wire.example.org/storm"/>
+    <updated>2026-10-19T17:55:00Z</updated>
+  </entry>
+  <entry>
+    <title>A very long headline that keeps going well past what any reasonable sub-editor would allow on a front page, with clause after clause about the committee, the minister, the inquiry and the report that nobody has read yet</title>
+    <id>urn:example:5</id>
+    <link href="https://wire.example.org/long"/>
+    <updated>2026-10-19T12:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Old news from last week that should be filtered out</title>
+    <id>urn:example:6</id>
+    <link href="https://wire.example.org/old"/>
+    <updated>2026-10-15T09:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Undated item about the library reopening</title>
+    <id>urn:example:7</id>
+    <link href="https://wire.example.org/library"/>
+  </entry>
+  <entry>
+    <title>Markets rally as central bank holds rates steady</title>
+    <id>urn:example:8</id>
+    <link href="https://wire.example.org/markets-rally-2"/>
+    <updated>2026-10-19T18:10:00Z</updated>
+  </entry>
+</feed>
