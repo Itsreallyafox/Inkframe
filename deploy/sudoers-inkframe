@@ -1,0 +1,35 @@
+# /etc/sudoers.d/inkframe: installed by install.sh (--bootstrap or a full
+# install).  Reference copy: deploy/sudoers-inkframe.  Keep the two identical.
+#
+# Passwordless root commands for user inkframe, so the git post-receive hook
+# (install.sh --update / --health) and everyday ops keep working even if
+# Raspberry Pi OS's blanket NOPASSWD drop-in (010_pi-nopasswd) is removed.
+# This is not a security boundary (apt-get and raspi-config are
+# root-equivalent); the list is short so its purpose stays obvious.
+
+# Service control: the hook restarts; ops start/stop/inspect; install.sh
+# enables the unit and reloads systemd after changing it.
+Cmnd_Alias INKFRAME_SERVICE = /usr/bin/systemctl start inkframe, \
+                              /usr/bin/systemctl stop inkframe, \
+                              /usr/bin/systemctl restart inkframe, \
+                              /usr/bin/systemctl status inkframe, \
+                              /usr/bin/systemctl enable inkframe, \
+                              /usr/bin/systemctl daemon-reload
+
+# install.sh --update copies the unit file from the checkout (this exact
+# command line only).
+Cmnd_Alias INKFRAME_UNIT = /usr/bin/install -m 0644 /opt/inkframe/app/deploy/inkframe.service /etc/systemd/system/inkframe.service
+
+# Logs: journalctl for the inkframe unit, any further flags (-n, -f, ...).
+Cmnd_Alias INKFRAME_LOGS = /usr/bin/journalctl -u inkframe*
+
+# OS maintenance: packages and SPI (install.sh), and a plain reboot after SPI
+# is enabled (deploy/bootstrap.ps1).
+Cmnd_Alias INKFRAME_OS = /usr/bin/apt-get, /usr/bin/raspi-config, /usr/sbin/reboot ""
+
+inkframe ALL=(root) NOPASSWD: INKFRAME_SERVICE, INKFRAME_UNIT, INKFRAME_LOGS
+
+# SETENV: install.sh runs "sudo -n DEBIAN_FRONTEND=noninteractive apt-get ...".
+# This file sorts after 010_pi-nopasswd, so this is the last rule matching
+# apt-get, and without the tag sudo refuses the variable.
+inkframe ALL=(root) NOPASSWD:SETENV: INKFRAME_OS

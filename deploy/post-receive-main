@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Deploy step for a push to main; versioned with the code it deploys.
+#
+# The bare repo's small post-receive hook (embedded in install.sh) checks main
+# out into /opt/inkframe/app and then runs
+#     bash /opt/inkframe/app/deploy/post-receive-main OLD NEW
+# A push that touches dependencies, install.sh, the systemd unit or C sources
+# gets "install.sh --update --no-apt"; anything else is a restart plus the
+# shared health check ("install.sh --health").  A full update is also forced
+# while the unit is missing or the previous deploy did not finish ok.  On
+# failure the service is never left stopped.
+#
+# git push ignores a post-receive hook's exit status, so the outcome is also
+# written to /opt/inkframe/last-deploy as "<sha> running|ok|failed <utc time>";
+# deploy.ps1 reads it.  Re-run by hand (OLD=0 forces a full update):
+#     bash /opt/inkframe/app/deploy/post-receive-main 0 "$(git --git-dir=/opt/inkframe/repo.git rev-parse main)"
+set -euo pipefail
+
+APP_ROOT=/opt/inkframe
+REPO=$APP_ROOT/repo.git
+APP=$APP_ROOT/app
+SERVICE=inkframe
+STATE_FILE=$APP_ROOT/last-deploy
+UNIT_DST=/etc/systemd/system/$SERVICE.service
+JOURNAL_LINES=40
+# Changed paths that need install.sh --update (pip, native build, unit file).
+FULL_UPDATE_RE='^(requirements\.txt|install\.sh|deploy/inkframe\.service|inkframe/render/.*\.[ch]|scripts/build_dither\.sh)$'
+
+DEPLOY_SHA=""
+START=$SECONDS
+
+# needs_full_update GIT_DIR OLD NEW
+# Exit status 0 if the push OLD..NEW needs a full install.sh --update, 1 if a
+# restart is enough.  Prints the reason either way.  An all-zero OLD (first
+# push) or a range git cannot diff always means a full update.
+needs_full_update() {
+  local git_dir=$1 old=$2 new=$3 changed hits
+  case "$old" in
+    *[!0]*) ;;
+    *)
+      echo "OLD is all zeros: first push, or a forced full update"
+      return 0
+      ;;
+  esac
+  if ! changed=$(git --git-dir="$git_dir" diff --name-only "$old" "$new" --); then
+    echo "cannot diff ${old:0:12}..${new:0:12}"
+    return 0
+  fi
+  hits=$(grep -E "$FULL_UPDATE_RE" <<<"$changed" || true)
+  if [ -n "$hits" ]; then
+    echo "changed: ${hits//$'\n'/ }"
+    return 0
+  fi
+  echo "no dependency, unit or C source changes"
+  return 1
+}
+
+# choose_full_update OLD NEW: like needs_full_update, but a full update is
+# also forced while the unit is not installed or the previous deploy did not
+# finish ok (so a code-only fix after a failed pip run still installs the
+# requirements).
+choose_full_update() {
+  local previous="" sha rest
+  if [ -f "$STATE_FILE" ] && read -r sha previous rest <"$STATE_FILE"; then
+    :
+  fi
+  if [ ! -f "$UNIT_DST" ]; then
+    echo "$UNIT_DST is not installed yet"
+    return 0
+  fi
+  if [ "$previous" != ok ]; then
+    echo "the previous deploy did not finish ok (${previous:-no record})"
+    return 0
+  fi
+  needs_full_update "$REPO" "$1" "$2"
+}
+
+# record running|ok|failed
+record() {
+  printf '%s %s %s\n' "$DEPLOY_SHA" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATE_FILE.tmp"
+  mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+journal_tail() {
+  printf -- '---- last %d journal lines for %s ----\n' "$JOURNAL_LINES" "$SERVICE"
+  sudo -n /usr/bin/journalctl -u "$SERVICE" -n "$JOURNAL_LINES" --no-pager 2>/dev/null ||
+    journalctl -u "$SERVICE" -n "$JOURNAL_LINES" --no-pager ||
+    true
+  printf -- '---- end of journal ----\n'
+}
+
+on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    record ok
+    return 0
+  fi
+  record failed || true
+  echo "!! DEPLOY FAILED for ${DEPLOY_SHA:0:12} (exit $rc) after $((SECONDS - START)) s"
+  if ! systemctl is-active --quiet "$SERVICE"; then
+    echo "!! $SERVICE is not active; starting it so the frame keeps running"
+    sudo -n /usr/bin/systemctl start "$SERVICE" || echo "!! systemctl start $SERVICE failed too"
+  fi
+  echo "!! fix and push again, or re-run on the Pi (docs/DEPLOY.md, Recovery)"
+  exit 1
+}
+
+main() {
+  if [ "$#" -ne 2 ]; then
+    echo "usage: bash $APP/deploy/post-receive-main OLD NEW" >&2
+    exit 2
+  fi
+  local old=$1 new=$2 reason full
+  unset GIT_DIR GIT_WORK_TREE
+  echo "==> deploying ${new:0:12}"
+  # decide before "running" overwrites the previous deploy's record
+  if reason=$(choose_full_update "$old" "$new"); then
+    full=1
+  else
+    full=0
+  fi
+  DEPLOY_SHA=$new
+  record running
+  trap on_exit EXIT
+  cd "$APP"
+  if [ "$full" -eq 1 ]; then
+    echo "==> full update ($reason): install.sh --update --no-apt"
+    bash "$APP/install.sh" --update --no-apt
+  else
+    echo "==> restart only ($reason)"
+    if ! sudo -n /usr/bin/systemctl restart "$SERVICE"; then
+      echo "!! systemctl restart $SERVICE failed"
+      journal_tail
+      exit 1
+    fi
+    bash "$APP/install.sh" --health
+  fi
+  echo "==> deployed ${new:0:12} in $((SECONDS - START)) s"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

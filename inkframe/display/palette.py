@@ -24,11 +24,12 @@ lands at native ``(0, 0)``.  Whether that is physically upright in the frame
 is confirmed on hardware with an asymmetric test card; ``rotation=270`` is the
 other mounting.
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 import numpy as np
 
@@ -89,9 +90,7 @@ class Palette:
         norm = []
         for i, c in enumerate(self.rgb):
             if len(c) != 3:
-                raise ValueError(
-                    f"palette entry {i} ({NAMES[i]}) must be an RGB triple, got {c!r}"
-                )
+                raise ValueError(f"palette entry {i} ({NAMES[i]}) must be an RGB triple, got {c!r}")
             t = tuple(int(v) for v in c)
             if any(v < 0 or v > 255 for v in t):
                 raise ValueError(f"palette entry {i} ({NAMES[i]}) out of range 0..255: {t}")
@@ -114,18 +113,18 @@ class Palette:
         return json.dumps({"name": self.name, "colors": self.as_dict()})
 
     @classmethod
-    def from_dict(cls, name: str, colors: dict[str, Sequence[int]]) -> "Palette":
+    def from_dict(cls, name: str, colors: dict[str, Sequence[int]]) -> Palette:
         missing = [n for n in NAMES if n not in colors]
         if missing:
             raise ValueError(f"palette is missing colours: {', '.join(missing)}")
         return cls(name, tuple(tuple(colors[n]) for n in NAMES))  # type: ignore[arg-type]
 
     @classmethod
-    def from_json(cls, text: str) -> "Palette":
+    def from_json(cls, text: str) -> Palette:
         d = json.loads(text)
         return cls.from_dict(d.get("name", "custom"), d["colors"])
 
-    def with_color(self, index: int, rgb: Iterable[int]) -> "Palette":
+    def with_color(self, index: int, rgb: Iterable[int]) -> Palette:
         rgb_list = list(self.rgb)
         rgb_list[index] = tuple(rgb)  # type: ignore[assignment]
         return Palette(self.name, tuple(rgb_list))
@@ -136,6 +135,7 @@ MEASURED_DEFAULT = Palette("measured", MEASURED_DEFAULT_RGB)
 
 
 # --- frame <-> controller bytes ----------------------------------------------
+
 
 def _check_rotation(rotation: int) -> None:
     if rotation not in VALID_ROTATIONS:
@@ -189,6 +189,7 @@ def unpack_frame(data: bytes, rotation: int = 90) -> np.ndarray:
 
 
 # --- frame <-> RGB ----------------------------------------------------------
+
 
 def indices_to_rgb(indices: np.ndarray, palette: Palette = MEASURED_DEFAULT) -> np.ndarray:
     """``(H, W)`` palette indices -> ``(H, W, 3)`` uint8 RGB using ``palette``."""

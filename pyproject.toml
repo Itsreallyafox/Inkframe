@@ -1,0 +1,51 @@
+# Inkframe runs from the checkout (`python -m inkframe` from the repo root) and
+# is never pip-installed, so there is no [build-system].  The Pi installs from
+# requirements.txt; keep the pins below identical to it.
+
+[project]
+name = "inkframe"
+version = "0.1.0"
+description = "LAN-only six-colour e-ink photo frame for a Raspberry Pi Zero 2 W"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.149.0",
+    "uvicorn==0.54.0",
+    "python-multipart==0.0.32",
+    "numpy==2.2.6",
+    "Pillow==12.3.0",
+    "pillow-heif==1.8.1",
+    "httpx==0.28.1",
+    "feedparser==6.0.14",
+    "pydantic==2.14.1",
+    "starlette==1.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+    "ruff==0.17.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+timeout = 120
+filterwarnings = [
+    # Starlette 1.x nudges TestClient users towards httpx2; httpx is our pinned client
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+known-first-party = ["inkframe"]

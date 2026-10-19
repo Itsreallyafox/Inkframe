@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Inkframe</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <header class="masthead">
+      <div class="swatches" aria-hidden="true">
+        <span class="sw sw-black"></span><span class="sw sw-white"></span><span class="sw sw-yellow"></span><span class="sw sw-red"></span><span class="sw sw-blue"></span><span class="sw sw-green"></span>
+      </div>
+      <h1>Inkframe</h1>
+      <p class="tagline">A six-colour e-ink frame</p>
+    </header>
+
+    <section class="card" aria-labelledby="status-title">
+      <div class="card-head">
+        <h2 id="status-title">Status</h2>
+        <span class="conn" data-field="conn" data-state="pending">connecting</span>
+      </div>
+      <dl class="facts" aria-live="polite">
+        <div><dt>Panel</dt><dd><span class="dot" data-field="panel-dot" data-state="unknown"></span><span data-field="panel">&mdash;</span></dd></div>
+        <div><dt>Display</dt><dd data-field="display">&mdash;</dd></div>
+        <div><dt>Last refresh</dt><dd data-field="last-refresh">&mdash;</dd></div>
+        <div><dt>Rotation</dt><dd data-field="rotation">&mdash;</dd></div>
+        <div><dt>Uptime</dt><dd data-field="uptime">&mdash;</dd></div>
+        <div><dt>Host</dt><dd data-field="host">&mdash;</dd></div>
+      </dl>
+    </section>
+
+    <footer class="foot">
+      <span data-field="version"></span>
+      <span>Placeholder page; the full interface comes later.</span>
+    </footer>
+  </main>
+</body>
+</html>

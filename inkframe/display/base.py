@@ -18,6 +18,7 @@ must honour:
 * Image data sent while asleep is ignored by the hardware, so ``show()``
   before ``init()`` is a programming error and raises ``DisplayNotReady``.
 """
+
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
@@ -66,9 +67,20 @@ class Display(Protocol):
     def sleep(self) -> None:
         """Deep-sleep the controller and cut panel power.  Idempotent, never raises."""
 
+    def close(self) -> None:
+        """``sleep()`` and release any OS resources (GPIO lines); for process
+        shutdown.  Idempotent, never raises.  A later ``init()`` re-acquires them."""
+
     @property
     def awake(self) -> bool:
         """True between a successful ``init()`` and the next ``sleep()``."""
+
+    @property
+    def state(self) -> str:
+        """``"asleep"`` | ``"awake"`` | ``"refreshing"`` (inside ``show``/``clear``).
+
+        Lock-free so ``/api/status`` can poll it during a 19 s refresh.
+        """
 
 
 def validate_frame(frame: np.ndarray) -> np.ndarray:
@@ -89,7 +101,5 @@ def validate_frame(frame: np.ndarray) -> np.ndarray:
             raise ValueError("frame values out of uint8 range")
         frame = frame.astype(np.uint8)
     if frame.size and frame.max() > 5:
-        raise ValueError(
-            f"frame contains palette index {int(frame.max())}; valid indices are 0..5"
-        )
+        raise ValueError(f"frame contains palette index {int(frame.max())}; valid indices are 0..5")
     return np.ascontiguousarray(frame)

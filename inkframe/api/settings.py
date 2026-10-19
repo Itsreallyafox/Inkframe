@@ -1,0 +1,31 @@
+"""``GET/PUT /api/settings``: the whole settings tree as JSON."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Body, HTTPException
+
+from inkframe.api import SettingsDep
+
+router = APIRouter(prefix="/api", tags=["settings"])
+
+
+@router.get("/settings")
+def read_settings(store: SettingsDep) -> dict[str, Any]:
+    """The full settings object (the shape of ``settings.json``)."""
+    return store.get().to_dict()
+
+
+@router.put("/settings")
+def update_settings(patch: Annotated[dict[str, Any], Body()], store: SettingsDep) -> dict[str, Any]:
+    """Deep-merge a full or partial settings object over the current settings
+    and return the saved result.
+
+    Nested objects merge key by key; lists (``rotation``, ``quiet_hours.days``)
+    are replaced whole.  Unknown keys or invalid values: 422 with the reason.
+    """
+    try:
+        return store.patch(patch).to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None

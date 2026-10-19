@@ -1,0 +1,25 @@
+# Inkframe runtime dependencies, exact pins.  Keep in sync with pyproject.toml.
+#
+# The Pi installs these with `pip install --prefer-binary -r requirements.txt`
+# into a venv created with --system-site-packages (spidev, gpiozero and lgpio
+# come from apt, never from here).  It must never compile anything: every
+# compiled package resolved from this file has a cp313 manylinux aarch64 wheel
+# on PyPI (numpy, Pillow, pillow-heif, pydantic-core; checked 2026-10-19).
+# Everything must also support Python 3.10 (the Windows dev desktop).
+
+fastapi==0.149.0
+# plain uvicorn on purpose: [standard] pulls compiled uvloop/httptools/watchfiles
+uvicorn==0.54.0
+python-multipart==0.0.32
+# numpy 2.2.x is the last series that supports Python 3.10
+numpy==2.2.6
+Pillow==12.3.0
+pillow-heif==1.8.1
+httpx==0.28.1
+feedparser==6.0.14
+
+# Transitive pins that matter.  pydantic pins its compiled core
+# (pydantic-core==2.50.1) exactly; starlette is FastAPI's core and FastAPI
+# leaves it unbounded above.
+pydantic==2.14.1
+starlette==1.7.0
