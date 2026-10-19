@@ -319,6 +319,13 @@ class RenderContext:
     http_timeout: float = 10.0
     #: what the panel really shows; useful for a test card's labels
     measured_palette: Palette = MEASURED_DEFAULT
+    #: for apps that are views over stored data (photos): the database, the
+    #: data paths, the global settings snapshot and the item to show (a photo
+    #: id chosen by the scheduler).  ``None`` for self-contained apps.
+    db: Any = None
+    paths: Any = None
+    app_settings: Any = None
+    item_id: str | None = None
 
 
 # --- the protocol ------------------------------------------------------------------
