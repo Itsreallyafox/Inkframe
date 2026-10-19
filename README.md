@@ -34,6 +34,29 @@ Environment variables:
 Useful endpoints: `GET /api/status`, `GET/PUT /api/settings`,
 `GET /api/system/logs?n=200`, `GET /api/health`.
 
+## Native dither library
+
+Dithering runs in C (`inkframe/render/dither.c`, loaded with ctypes). Build
+it once on the desktop before running the tests, and again after changing the
+C file:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_dither.ps1   # MSVC -> inkframe\render\dither.dll
+```
+
+The script finds Visual Studio 2022 with `vswhere` and needs the C++
+workload. On Linux, `bash scripts/build_dither.sh` builds
+`inkframe/render/libdither.so` with gcc. The Pi builds `libdither.so` itself
+on every deploy that touches `inkframe/render/*.c` (`install.sh`
+`build_native`), so nothing native is ever pushed. Both outputs are
+gitignored.
+
+There is no Python fallback. Without the library, `inkframe.render.dither`
+raises `DitherLibraryMissing` naming the build command, and
+`tests/test_dither.py` fails every dither test with the build command (the rest of the suite still runs). For experiments:
+`python -m inkframe.render.dither IN.png OUT.png --method atkinson --fit`.
+Design notes, fixed-point rules and timings are in `docs/DITHER.md`.
+
 ## Layout
 
 ```
@@ -46,7 +69,7 @@ tests/             pytest suite
 
 Runtime dependencies are pinned in `requirements.txt` (mirrored in
 `pyproject.toml`); every compiled one has a Python 3.13 aarch64 wheel so the
-Pi never compiles anything.
+Pi never compiles anything except our own `dither.c`.
 
 Install, deployment and usage documentation will follow as the remaining
 phases land.
