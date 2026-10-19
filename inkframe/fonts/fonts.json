@@ -1,0 +1,48 @@
+{
+  "roles": {
+    "serif": {
+      "family": "Playfair Display",
+      "dir": "playfair-display",
+      "files": {
+        "regular": "PlayfairDisplay-Regular.ttf",
+        "bold": "PlayfairDisplay-Bold.ttf",
+        "italic": "PlayfairDisplay-Italic.ttf"
+      }
+    },
+    "sans": {
+      "family": "Inter",
+      "dir": "inter",
+      "files": {
+        "regular": "Inter-Regular.ttf",
+        "medium": "Inter-Medium.ttf",
+        "semibold": "Inter-SemiBold.ttf",
+        "bold": "Inter-Bold.ttf"
+      }
+    },
+    "mono": {
+      "family": "JetBrains Mono",
+      "dir": "jetbrains-mono",
+      "files": {
+        "regular": "JetBrainsMono-Regular.ttf",
+        "bold": "JetBrainsMono-Bold.ttf"
+      }
+    }
+  },
+  "sources": {
+    "playfair-display": {
+      "url": "https://github.com/clauseggers/Playfair-Display/tree/1.202/fonts/TTF",
+      "version": "1.202",
+      "license": "OFL-1.1"
+    },
+    "inter": {
+      "url": "https://github.com/rsms/inter/releases/tag/v4.1",
+      "version": "v4.1",
+      "license": "OFL-1.1"
+    },
+    "jetbrains-mono": {
+      "url": "https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304",
+      "version": "v2.304",
+      "license": "OFL-1.1"
+    }
+  }
+}
