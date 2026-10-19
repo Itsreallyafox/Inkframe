@@ -143,7 +143,9 @@ class FakeApp:
         self.renders.append(ctx.item_id)
         if self.fail:
             raise RuntimeError(f"{self.id} is broken")
-        colour = self.colour if ctx.item_id is None else int(ctx.item_id[:8], 16) % 6
+        colour = (
+            self.colour if ctx.item_id is None else (0, 2, 3, 4, 5)[int(ctx.item_id[:8], 16) % 5]
+        )
         frame = np.full((PANEL_HEIGHT, PANEL_WIDTH), colour, dtype=np.uint8)
         frame[0, 0] = self.colour
         return frame
