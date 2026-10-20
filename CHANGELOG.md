@@ -2,6 +2,23 @@
 
 All notable changes to Inkframe. One entry per build phase; dates are UTC.
 
+## 0.1.0 — Phase 4: web UI (2026-10-20)
+
+- Mobile-first no-build UI (184 KB of HTML/CSS/JS, one font file): Now
+  (the last frame pixel-perfect in a bezel, what is showing and next,
+  pause/resume/show-next, panel status), Photos (grid of dithered renders,
+  drop zone with browser-side downscale and per-file progress), Editor
+  (sticky stage, Detail-mode method strip, debounced single-method live
+  preview, zoom, save / make default / reset / show), Rotation (drag reorder
+  with auto-scroll, slot settings, cycle timeline, quiet hours, floor,
+  keep-alive), Apps (forms from each app's schema, previews), Settings
+  (palette editor, test card, rotation, storage, logs, restart).
+- Backend: POST /api/system/restart, storage usage in /api/status,
+  GET /api/display/frame.png, optional "variant" on POST /api/display/show,
+  optional "methods" filter on POST /api/photos/{id}/previews.
+- Independent UX review in the browser at 375/390/768/1280 px; all critical
+  and design findings fixed; screenshots in docs/ui/.
+
 ## 0.1.0 — Phase 3: photo pipeline and API (2026-10-19)
 
 - `inkframe/render/masters.py`: upload ingest. Formats are sniffed from
