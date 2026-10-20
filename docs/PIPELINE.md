@@ -354,7 +354,7 @@ The photo object is `Photo.to_dict()` without `master_path`, plus
 | `POST /photos` | multipart `file` (one), optional `name` | 201 photo (its default render cached unless that failed: `render_ready`). 413 / 415 / 422, 408 for a body that stalls |
 | `GET /photos/{id}` | | photo |
 | `GET /photos/{id}/render?recipe=<key>` | | `image/png`, `Cache-Control: public, max-age=31536000, immutable`. A missing key is rendered when it is the current one, otherwise 404. Without `recipe`: the current render, `no-cache` |
-| `POST /photos/{id}/previews` | any of the recipe knobs except `method` (which is ignored) | `{"previews": [{"method", "name", "description", "kind", "key", "url"} x 12], "took_ms": n}` in registry order |
+| `POST /photos/{id}/previews` | any of the recipe knobs except `method` (which is ignored); optional `"methods": [id, ...]` renders only those (the editor's live preview asks for one) | `{"previews": [{"method", "name", "description", "kind", "key", "url"} x 12, or one per asked method], "took_ms": n}` in registry order |
 | `PUT /photos/{id}/recipe` | full or partial recipe, or `{"reset": true}`; no fields changes nothing | photo, rendered |
 | `PUT /photos/{id}/flags` | `{"excluded": bool}` | photo |
 | `DELETE /photos/{id}` | | 204 |

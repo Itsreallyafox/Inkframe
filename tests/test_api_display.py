@@ -17,11 +17,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 import inkframe.app as app_module
+import inkframe.scheduler as scheduler_module
 from inkframe.app import create_app
 from inkframe.config import SettingsStore
 from inkframe.display.mock import MockDisplay
 from inkframe.scheduler import Scheduler, iso, local_now
-from tests.conftest import FakeClock, RecordingDisplay, at, gradient_image, jpeg_bytes
+from tests.conftest import (
+    FakeApp,
+    FakeClock,
+    RecordingDisplay,
+    Rig,
+    at,
+    fake_apps,
+    gradient_image,
+    jpeg_bytes,
+)
 
 SNAPSHOT_KEYS = {"ok", "panel", "rotation"}
 PANEL_KEYS = {"state", "last_refresh_at", "last_attempt_at", "last_source", "last_error"}
@@ -463,3 +473,128 @@ def test_rotation_put_empty_list_is_allowed(client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["slots"] == []
     rot = client.get("/api/status").json()["rotation"]
     assert rot["current"] is None and rot["next"] is None and rot["next_at"] is None
+
+
+# --- /api/display/frame.png ------------------------------------------------------------
+
+
+def test_frame_png_is_404_until_something_was_shown(client: TestClient) -> None:
+    r = client.get("/api/display/frame.png")
+    assert r.status_code == 404 and "error" in r.json()
+
+
+def test_frame_png_serves_the_last_frame_with_an_etag(
+    client: TestClient, data_dir: Path, mock_display: MockDisplay
+) -> None:
+    client.post("/api/display/show", json={"app_id": "quotes"})
+    _tick(client)
+    r = client.get("/api/display/frame.png")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == "no-cache"
+    assert r.content == (data_dir / "last_frame.png").read_bytes()
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    etag = r.headers["etag"]
+    again = client.get("/api/display/frame.png", headers={"If-None-Match": etag})
+    assert again.status_code == 304 and again.content == b""
+    assert again.headers["etag"] == etag
+    stale = client.get("/api/display/frame.png", headers={"If-None-Match": '"0-0"'})
+    assert stale.status_code == 200 and stale.content == r.content
+
+
+# --- show now with a forced variant ----------------------------------------------------
+
+
+class _VariantApp(FakeApp):
+    """A fake app with three layouts that records the variant of each render."""
+
+    variants = 3
+
+    def __init__(self, app_id: str, colour: int) -> None:
+        super().__init__(app_id, colour)
+        self.variants_seen: list[int | None] = []
+
+    def render(self, ctx: Any) -> Any:
+        self.variants_seen.append(ctx.variant)
+        return super().render(ctx)
+
+
+def test_scheduler_show_now_passes_the_variant_to_the_render(tmp_path: Path) -> None:
+    apps = fake_apps()
+    alpha = apps["alpha"] = _VariantApp("alpha", 2)
+    rig = Rig(tmp_path, apps=apps)
+    info = rig.sched.show_now(app_id="alpha", variant=2)
+    assert info["kind"] == "app" and info["id"] == "alpha"
+    rig.tick()
+    assert alpha.variants_seen == [2]
+    # the Now page names a forced layout (the patterns test card) by it
+    assert rig.source() == {"type": "app", "id": "alpha", "label": "Alpha", "variant": 2}
+    # the variant was for that one showing: a plain show-now picks its own
+    rig.sched.show_now(app_id="alpha")
+    rig.clock.advance(seconds=200)
+    rig.tick()
+    assert alpha.variants_seen == [2, None]
+    assert rig.source() == {"type": "app", "id": "alpha", "label": "Alpha"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "fragment"),
+    [
+        ({"app_id": "alpha", "variant": 3}, "0..2"),
+        ({"app_id": "alpha", "variant": -1}, "0..2"),
+        ({"app_id": "beta", "variant": 1}, "0..0"),
+        ({"app_id": "alpha", "variant": True}, "whole number"),
+        ({"photo_id": "ab" * 16, "variant": 0}, "app_id only"),
+    ],
+)
+def test_scheduler_show_now_rejects_bad_variants(
+    tmp_path: Path, kwargs: dict[str, Any], fragment: str
+) -> None:
+    apps = fake_apps()
+    apps["alpha"] = _VariantApp("alpha", 2)
+    rig = Rig(tmp_path, apps=apps)
+    with pytest.raises(ValueError, match=fragment):
+        rig.sched.show_now(**kwargs)
+    assert rig.snapshot()["rotation"]["pending"] is None
+
+
+def test_show_patterns_test_card_variant_over_http(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, int | None]] = []
+    real = scheduler_module.build_render_context
+
+    def spy(app: Any, **kw: Any) -> Any:
+        seen.append((app.id, kw.get("variant")))
+        return real(app, **kw)
+
+    monkeypatch.setattr(scheduler_module, "build_render_context", spy)
+    before = client.get("/api/apps/patterns/settings").json()
+    r = client.post("/api/display/show", json={"app_id": "patterns", "variant": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["rotation"]["pending"]["id"] == "patterns"
+    _tick(client)
+    assert seen == [("patterns", 2)]
+    status = client.get("/api/status").json()
+    assert status["panel"]["last_source"]["id"] == "patterns"
+    # the user's pattern settings are untouched
+    assert client.get("/api/apps/patterns/settings").json() == before
+
+
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        ({"app_id": "patterns", "variant": 3}, "0..2"),
+        ({"app_id": "patterns", "variant": "2"}, "whole number"),
+        ({"app_id": "patterns", "variant": True}, "whole number"),
+        ({"app_id": "patterns", "variant": None}, "whole number"),
+        ({"app_id": "patterns", "variant": -1}, "whole number"),
+        ({"photo_id": "ab" * 16, "variant": 0}, "app_id only"),
+    ],
+)
+def test_show_variant_validation_over_http(
+    client: TestClient, body: dict[str, Any], fragment: str
+) -> None:
+    r = client.post("/api/display/show", json=body)
+    assert r.status_code == 422, r.text
+    assert fragment in r.json()["error"]
+    assert client.get("/api/status").json()["rotation"]["pending"] is None

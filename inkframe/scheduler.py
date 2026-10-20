@@ -546,6 +546,8 @@ class _Pending:
     label: str
     #: for the log; ``fires_at`` is derived from the last attempt, not from this
     requested_at: datetime
+    #: an app show-now may force one of the app's layout variants
+    variant: int | None = None
 
 
 @dataclass(frozen=True)
@@ -557,6 +559,7 @@ class _Item:
     rotation timing alone (show-now of something outside the rotation, or a
     keep-alive re-render).  ``error`` is set when the item cannot be rendered
     at all (the photo list is unreadable): it fails like a render that raised.
+    ``variant`` forces the app's layout variant (``RenderContext.variant``).
     """
 
     slot_index: int | None
@@ -564,6 +567,7 @@ class _Item:
     photo: Photo | None
     mode: str
     error: str | None = None
+    variant: int | None = None
 
 
 @dataclass(frozen=True)
@@ -727,21 +731,39 @@ class Scheduler:
         request as ``snapshot()`` reports it."""
         return self._queue(_Pending("next", None, "Next", _aware(self._now_fn())))
 
-    def show_now(self, app_id: str | None = None, photo_id: str | None = None) -> dict[str, Any]:
+    def show_now(
+        self,
+        app_id: str | None = None,
+        photo_id: str | None = None,
+        *,
+        variant: int | None = None,
+    ) -> dict[str, Any]:
         """Queue a show-now of an app or a photo (exactly one of the two).
 
-        Raises ``ValueError`` unless exactly one is given and ``KeyError`` for
-        an unknown app or photo id.  Excluded photos may still be shown
+        ``variant`` (apps only) forces one of the app's layout variants for
+        this showing, e.g. the patterns app's palette test card.
+
+        Raises ``ValueError`` unless exactly one is given (or for a variant
+        that is out of range or given with a photo) and ``KeyError`` for an
+        unknown app or photo id.  Excluded photos may still be shown
         explicitly.  A newer request replaces an older pending one.
         """
         if (app_id is None) == (photo_id is None):
             raise ValueError("pass exactly one of app_id or photo_id")
+        if variant is not None and app_id is None:
+            raise ValueError("variant goes with app_id only")
         now = _aware(self._now_fn())
         if app_id is not None:
             app = self._apps.get(app_id)
             if app is None:
                 raise KeyError(f"unknown app {app_id!r}")
-            return self._queue(_Pending("app", app_id, app.name, now))
+            if variant is not None:
+                count = int(getattr(app, "variants", 1))
+                if isinstance(variant, bool) or not isinstance(variant, int):
+                    raise ValueError(f"variant must be a whole number, got {variant!r}")
+                if not 0 <= variant < count:
+                    raise ValueError(f"variant must be 0..{count - 1} for {app_id}, got {variant}")
+            return self._queue(_Pending("app", app_id, app.name, now, variant))
         assert photo_id is not None
         photo = self._db.get_photo(photo_id)
         if photo is None:
@@ -1193,11 +1215,13 @@ class Scheduler:
                 error = self._photo_list_error()
             else:
                 photo = self._peek_photo(photos, order, current=self._state.photo_id)
+        variant = req.variant if req.kind == "app" else None
         if target is None:
-            return _Item(None, app_id, photo, "keep", error)
+            return _Item(None, app_id, photo, "keep", error, variant)
         if target == cur and cur_started:
-            return _Item(target, app_id, photo, "photo" if photo is not None else "keep", error)
-        return _Item(target, app_id, photo, "enter", error)
+            mode = "photo" if photo is not None else "keep"
+            return _Item(target, app_id, photo, mode, error, variant)
+        return _Item(target, app_id, photo, "enter", error, variant)
 
     # --- actions ---------------------------------------------------------------------------
 
@@ -1234,7 +1258,10 @@ class Scheduler:
         if item.photo is not None:
             return {"type": "photo", "id": item.photo.id, "label": item.photo.original_name}
         app = self._apps.get(item.app_id)
-        return {"type": "app", "id": item.app_id, "label": app.name if app else item.app_id}
+        source = {"type": "app", "id": item.app_id, "label": app.name if app else item.app_id}
+        if item.variant is not None:
+            source["variant"] = item.variant  # a forced layout (the test card)
+        return source
 
     def _already_showing(self, source: Mapping[str, Any]) -> bool:
         """True when ``source`` is static content (a photo, or the photos
@@ -1338,6 +1365,7 @@ class Scheduler:
             fonts=self._fonts,
             online=self._online,
             item_id=item.photo.id if item.photo is not None else None,
+            variant=item.variant,
         )
 
         def job() -> np.ndarray:

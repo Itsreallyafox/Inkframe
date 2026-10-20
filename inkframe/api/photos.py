@@ -44,7 +44,7 @@ from inkframe.db import Database, Photo
 from inkframe.paths import DataPaths
 from inkframe.render import masters, pipeline
 from inkframe.render.cache import RenderCache, encode_png, valid_key, valid_photo_id
-from inkframe.render.dither import DitherError
+from inkframe.render.dither import METHODS, METHODS_BY_ID, DitherError, DitherMethod
 
 log = logging.getLogger("inkframe.api.photos")
 
@@ -371,13 +371,14 @@ def _previews_job(
     db: Database,
     store: SettingsStore,
     paths: DataPaths,
+    methods: tuple[DitherMethod, ...] = METHODS,
 ) -> list[dict[str, Any]]:
     photo = _get_photo(db, photo_id)
     settings = store.get()
     effective = pipeline.effective_recipe(photo, settings)
     base = pipeline.complete_recipe(overrides, base=effective)
     cache = RenderCache(paths)
-    renders = cache.render_methods(photo, base, settings)
+    renders = cache.render_methods(photo, base, settings, methods=methods)
     keep = {r.key for r in renders} | {pipeline.key_for(effective, settings)}
     cache.prune(photo_id, keep_keys=keep)
     return [
@@ -393,6 +394,22 @@ def _previews_job(
     ]
 
 
+def _methods_filter(value: Any) -> tuple[DitherMethod, ...]:
+    """The ``methods`` of a previews body: None for all of them, else a
+    non-empty list of known method ids (duplicates are fine)."""
+    if value is None:
+        return METHODS
+    if not isinstance(value, list) or not value:
+        raise HTTPException(
+            status_code=422, detail="methods must be a non-empty list of method ids"
+        )
+    unknown = [m for m in value if not isinstance(m, str) or m not in METHODS_BY_ID]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"methods: unknown method(s) {unknown!r}")
+    wanted = set(value)
+    return tuple(m for m in METHODS if m.id in wanted)
+
+
 @router.post("/{photo_id}/previews")
 async def make_previews(
     photo_id: str,
@@ -406,12 +423,17 @@ async def make_previews(
     given knobs (``brightness, contrast, saturation, gamma, sharpen,
     serpentine, strength, distance, palette``; any subset, the rest from the
     effective recipe; ``method`` is ignored).  Cached renders are reused, so
-    repeating a call is cheap."""
+    repeating a call is cheap.
+
+    ``"methods": [id, ...]`` limits the answer to those methods (still in
+    registry order): the editor's live preview asks for the selected method
+    alone, so a knob change costs one dither instead of twelve on the Pi."""
     _require_id(photo_id)
     overrides = dict(body or {})
     overrides.pop("method", None)
+    methods = _methods_filter(overrides.pop("methods", None))
     t0 = time.perf_counter()
-    previews = await _run(executor, _previews_job, photo_id, overrides, db, store, paths)
+    previews = await _run(executor, _previews_job, photo_id, overrides, db, store, paths, methods)
     return {"previews": previews, "took_ms": round((time.perf_counter() - t0) * 1000)}
 
 

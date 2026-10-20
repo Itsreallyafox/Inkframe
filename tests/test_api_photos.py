@@ -204,6 +204,25 @@ def test_previews_with_overrides(client: TestClient, data_dir: Path) -> None:
     assert client.get(f"/api/photos/{pid}").json()["recipe"] is None
 
 
+def test_previews_for_some_methods(client: TestClient) -> None:
+    """``methods`` limits the renders to those methods, in registry order, with
+    the same keys the full set would have (the editor's live preview)."""
+    pid = upload(client, jpeg_bytes(gradient_image(300, 200))).json()["id"]
+    knobs = {"contrast": 1.2}
+    r = client.post(
+        f"/api/photos/{pid}/previews", json={**knobs, "methods": ["stucki", "atkinson"]}
+    )
+    assert r.status_code == 200, r.text
+    some = r.json()["previews"]
+    assert [p["method"] for p in some] == ["atkinson", "stucki"]
+    full = client.post(f"/api/photos/{pid}/previews", json=knobs).json()["previews"]
+    by_method = {p["method"]: p for p in full}
+    assert all(p == by_method[p["method"]] for p in some)
+    for bad in ([], "atkinson", ["atkinson", "crosshatch"], [3]):
+        r = client.post(f"/api/photos/{pid}/previews", json={"methods": bad})
+        assert r.status_code == 422 and "methods" in r.json()["error"], bad
+
+
 def test_previews_errors(client: TestClient) -> None:
     pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60)))).json()["id"]
     r = client.post(f"/api/photos/{pid}/previews", json={"strength": 3})
