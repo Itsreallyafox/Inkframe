@@ -1,34 +1,90 @@
-"""Photos app: STUB written in Phase 6 so the scheduler has a photos slot.
+"""Photos: the panel shows one uploaded photo, dithered with its recipe.
 
-PHASE 3 REPLACES THIS WHOLE FILE with the real app (cached dithered renders
-of the uploaded photos).  The contract the scheduler relies on, which the
-real app must keep:
+The scheduler picks the photo (shuffle or sequential, dwell time: plan
+section 9) and passes its id as ``RenderContext.item_id``; this app only
+turns that id into a frame.  The frame comes from the render cache
+(``inkframe.render.cache``), rendering on a miss, so what the panel shows is
+byte for byte the PNG the Photos page displays for the same recipe.
 
-* ``APP.id == "photos"`` and ``settings_schema == ()``: per-slot behaviour
-  (``dwell_minutes``, ``order``) lives in the rotation slot's ``options``,
-  and the scheduler chooses which photo to show;
-* ``render(ctx)`` returns the ``(400, 600)`` palette-index frame for the photo
-  ``ctx.item_id`` (``ctx.db``/``ctx.paths``/``ctx.app_settings`` are set), or
-  the "no photos" card when ``ctx.item_id`` is ``None``;
-* an unknown photo id raises ``AppError`` (the scheduler logs it and skips).
+``needs_dither`` is False because the app returns a finished palette-index
+frame: the photo was already dithered by the pipeline with its own recipe,
+and the "no photos" card is drawn in exact palette colours.
 
-Until then a photo renders as a placeholder card with its name and id.
+* ``item_id`` is ``None``, or the photo was deleted: a tidy "No photos yet"
+  card (the Apps page preview shows it too).
+* the photo exists but its master file is missing or unreadable:
+  ``AppError``, so the scheduler logs it and moves on.
+* ``ctx.app_settings`` must be the global ``Settings`` snapshot (it picks
+  the recipe and palette); anything else is an ``AppError``, not a quiet
+  render with default settings.
 """
 
 from __future__ import annotations
 
-from PIL import Image
+import logging
 
-from inkframe.apps.base import AppError, Field, RenderContext
+import numpy as np
+
+from inkframe.apps.base import AppError, Field, FontLibrary, RenderContext
 from inkframe.apps.draw import Canvas
+from inkframe.config import Settings
 from inkframe.display.palette import BLACK, BLUE, GREEN, RED, WHITE, YELLOW
+from inkframe.render.cache import RenderCache
+from inkframe.render.dither import DitherError
+from inkframe.render.pipeline import MasterMissing
 
-#: keyline inset from the panel edge
-_INSET = 22
+log = logging.getLogger("inkframe.apps.photos")
+
+UPLOAD_HINT = "Upload at http://inkframe.local/"
+HEADLINE = "No photos yet"
+SUBLINE = "Add some from your phone or computer."
+
+W, H = 600, 400
+
+
+def _camera(c: Canvas, cx: int, top: int) -> None:
+    """A small camera drawn from primitives: black body, blue lens, yellow
+    flash, red shutter button.  ``top`` is the top of the viewfinder hump;
+    the glyph is 140 x 106 pixels."""
+    c.rect((cx - 30, top, cx + 30, top + 26), fill=BLACK, radius=6)  # viewfinder hump
+    c.rect((cx - 60, top + 6, cx - 40, top + 18), fill=RED, radius=3)  # shutter button
+    c.rect((cx - 70, top + 16, cx + 70, top + 106), fill=BLACK, radius=14)  # body
+    c.ellipse((cx - 36, top + 25, cx + 36, top + 97), fill=WHITE)  # lens rim
+    c.ellipse((cx - 28, top + 33, cx + 28, top + 89), fill=BLUE)  # glass
+    c.ellipse((cx - 13, top + 48, cx + 13, top + 74), fill=BLACK)  # aperture
+    c.ellipse((cx + 3, top + 51, cx + 11, top + 59), fill=WHITE)  # glint
+    c.rect((cx + 44, top + 28, cx + 60, top + 38), fill=YELLOW, radius=2)  # flash
+
+
+def no_photos_card(fonts: FontLibrary) -> Canvas:
+    """The card shown when there is no photo to show."""
+    c = Canvas(WHITE)
+    cx = W // 2
+    _camera(c, cx, 52)
+
+    headline = fonts.font("serif", 54, "bold")
+    c.text((cx, 230), HEADLINE, headline, BLACK, anchor="ms")
+    sub = fonts.font("sans", 20)
+    c.text((cx, 266), SUBLINE, sub, BLACK, anchor="ms")
+
+    # the address in a pill, like a browser's address bar
+    mono = fonts.font("mono", 19)
+    half = c.text_width(UPLOAD_HINT, mono) // 2 + 16
+    c.rect((cx - half, 298, cx + half, 336), outline=BLACK, width=2, radius=19)
+    c.text((cx, 317), UPLOAD_HINT, mono, BLUE, anchor="mm")
+
+    # the panel's own colours as a signature strip along the bottom edge
+    bands = (YELLOW, RED, BLUE, GREEN, BLACK)
+    band_w = W // len(bands)
+    for i, colour in enumerate(bands):
+        x0 = i * band_w
+        x1 = W if i == len(bands) - 1 else x0 + band_w
+        c.rect((x0, H - 10, x1 - 1, H - 1), fill=colour)
+    return c
 
 
 class PhotosApp:
-    """The photos slot (stub; see the module docstring)."""
+    """``APP`` of ``inkframe.apps.photos``."""
 
     id = "photos"
     name = "Photos"
@@ -37,52 +93,31 @@ class PhotosApp:
     settings_schema: tuple[Field, ...] = ()
     variants = 1
 
-    def render(self, ctx: RenderContext) -> Image.Image:
-        c = Canvas(background=WHITE)
-        c.rect(
-            (_INSET, _INSET, c.width - 1 - _INSET, c.height - 1 - _INSET), outline=BLACK, width=2
-        )
-        if ctx.item_id is None:
-            self._empty(c, ctx)
-            return c.to_image()
-        photo = ctx.db.get_photo(ctx.item_id) if ctx.db is not None else None
+    def render(self, ctx: RenderContext) -> np.ndarray:
+        """The ``(400, 600)`` index frame for ``ctx.item_id`` (rendered and
+        cached on a miss), or the "no photos" card."""
+        if ctx.item_id is None or ctx.db is None:
+            return no_photos_card(ctx.fonts).to_frame()
+        photo = ctx.db.get_photo(ctx.item_id)
         if photo is None:
-            raise AppError(f"photo {ctx.item_id} not found")
-        mono = ctx.fonts.font("mono", 16)
-        c.text((_INSET + 22, _INSET + 20), "PHOTO", mono, BLACK)
-        c.text((c.width - _INSET - 22, _INSET + 20), photo.id[:8], mono, BLACK, anchor="ra")
-        font, lines, _ = c.fit_text(
-            photo.original_name,
-            480,
-            150,
-            lambda size: ctx.fonts.font("serif", size),
-            max_size=56,
-            min_size=20,
-        )
-        lh = c.line_height(font, 1.15)
-        y = 200 - len(lines) * lh // 2
-        for line in lines[:3]:
-            c.text((300, y), line, font, BLACK, anchor="ma")
-            y += lh
-        c.rect((270, y + 16, 329, y + 19), fill=RED)
-        shape = f"{photo.width} × {photo.height}" + (" · portrait" if photo.portrait else "")
-        c.text((300, c.height - _INSET - 26), shape, mono, BLACK, anchor="ms")
-        return c.to_image()
-
-    @staticmethod
-    def _empty(c: Canvas, ctx: RenderContext) -> None:
-        """The "no photos yet" card: serif headline, the upload address in mono,
-        and the six panel colours as a small row of swatches."""
-        serif = ctx.fonts.font("serif", 54)
-        mono = ctx.fonts.font("mono", 18)
-        c.text((300, 186), "No photos yet", serif, BLACK, anchor="ms")
-        c.rect((270, 208, 329, 211), fill=RED)
-        c.text((300, 256), "Upload at http://inkframe.local/", mono, BLACK, anchor="ms")
-        x = 300 - (5 * 26 + 18) // 2
-        for colour in (BLACK, RED, YELLOW, GREEN, BLUE):
-            c.rect((x, 300, x + 17, 317), fill=colour)
-            x += 26
-        c.rect((x, 300, x + 17, 317), outline=BLACK, width=2)
+            log.info("photo %s is gone; showing the no-photos card", ctx.item_id)
+            return no_photos_card(ctx.fonts).to_frame()
+        if ctx.paths is None:
+            raise AppError("the photos app needs the data paths to find renders")
+        settings = ctx.app_settings
+        if not isinstance(settings, Settings):
+            # never guess: default settings would dither with the default
+            # palette and recipe, under keys the Photos page never shows
+            raise AppError(
+                "the photos app needs the global Settings snapshot as ctx.app_settings, "
+                f"got {type(settings).__name__}"
+            )
+        try:
+            return RenderCache(ctx.paths).render_or_get(photo, None, settings).frame
+        except MasterMissing as exc:
+            raise AppError(str(exc)) from None
+        except DitherError as exc:
+            raise AppError(f"cannot dither photo {photo.id}: {exc}") from None
 
 
 APP = PhotosApp()

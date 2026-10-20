@@ -7,13 +7,20 @@ The lifespan in ``inkframe.app`` puts the process-wide objects on
 Error convention for every route: non-2xx responses carry
 ``{"error": "<message>"}``.  Raise ``fastapi.HTTPException(status, detail)``
 and the app converts it.
+
+Heavy work (image decode, resize, dither, PNG encode) never runs on the
+event loop: ``async`` routes hand it to the one-thread render executor with
+``run_on_render_executor``, so previews, uploads and the scheduler share one
+worker and the Pi never runs two dithers at once.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import functools
+from collections.abc import Callable, Mapping
 from concurrent.futures import Executor
-from typing import Annotated
+from typing import Annotated, Any, TypeVar
 
 from fastapi import Depends, HTTPException, Request
 
@@ -23,6 +30,8 @@ from inkframe.db import Database
 from inkframe.display.base import Display
 from inkframe.paths import DataPaths
 from inkframe.scheduler import Scheduler
+
+T = TypeVar("T")
 
 
 def get_settings_store(request: Request) -> SettingsStore:
@@ -72,3 +81,11 @@ SchedulerDep = Annotated[Scheduler, Depends(get_scheduler)]
 AppsDep = Annotated[Mapping[str, App], Depends(get_apps)]
 ExecutorDep = Annotated[Executor, Depends(get_render_executor)]
 FontsDep = Annotated[FontLibrary, Depends(get_fonts)]
+RenderExecutorDep = Annotated[Executor, Depends(get_render_executor)]
+
+
+async def run_on_render_executor(executor: Executor, fn: Callable[..., T], *args: Any) -> T:
+    """Run ``fn(*args)`` on the render executor and await its result without
+    blocking the event loop.  Exceptions raised by ``fn`` propagate."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, functools.partial(fn, *args))

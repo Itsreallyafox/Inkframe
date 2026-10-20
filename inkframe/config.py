@@ -98,7 +98,10 @@ def _int(path: str, value: object, lo: int, hi: int) -> int:
 def _number(path: str, value: object, lo: float, hi: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{path} must be a number, got {value!r}")
-    v = float(value)
+    try:
+        v = float(value)
+    except OverflowError:  # a JSON integer too large for a float (400 digits)
+        raise ValueError(f"{path} must be between {lo} and {hi}, got a huge number") from None
     if not (math.isfinite(v) and lo <= v <= hi):
         raise ValueError(f"{path} must be between {lo} and {hi}, got {value!r}")
     return v

@@ -21,7 +21,7 @@ from inkframe.app import create_app
 from inkframe.config import SettingsStore
 from inkframe.display.mock import MockDisplay
 from inkframe.scheduler import Scheduler, iso, local_now
-from tests.conftest import FakeClock, RecordingDisplay, at
+from tests.conftest import FakeClock, RecordingDisplay, at, gradient_image, jpeg_bytes
 
 SNAPSHOT_KEYS = {"ok", "panel", "rotation"}
 PANEL_KEYS = {"state", "last_refresh_at", "last_attempt_at", "last_source", "last_error"}
@@ -47,10 +47,11 @@ def _quiet_off(client: TestClient) -> None:
 
 
 def _add_photo(client: TestClient, name: str = "beach.jpg") -> str:
-    photo = client.app.state.db.add_photo(
-        original_name=name, width=1800, height=1200, master_path="m", master_bytes=1
-    )
-    return photo.id
+    """Upload a small real photo through the API (the photos app needs a master)."""
+    data = jpeg_bytes(gradient_image(600, 400))
+    r = client.post("/api/photos", files={"file": (name, data, "image/jpeg")})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
 
 
 # --- /api/display ----------------------------------------------------------------------

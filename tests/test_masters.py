@@ -1,0 +1,937 @@
+"""Upload ingest: sniffing, limits, decoding, orientation, alpha, masters on disk."""
+
+from __future__ import annotations
+
+import io
+import struct
+import time
+import tracemalloc
+import zlib
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+from PIL import BmpImagePlugin, Image, ImageCms, ImageOps, PngImagePlugin
+
+from inkframe.paths import DataPaths
+from inkframe.render import masters
+from inkframe.render.masters import (
+    MASTER_LONG_EDGE,
+    UndecodableImage,
+    UnsupportedImageType,
+    UploadTooLarge,
+    ingest,
+    sanitize_name,
+    sniff_format,
+)
+from tests.conftest import encode, gradient_image, heic_bytes, jpeg_bytes
+
+
+@pytest.fixture
+def paths(tmp_path: Path) -> DataPaths:
+    return DataPaths(tmp_path / "data").ensure_dirs()
+
+
+def _open_master(m: masters.Master) -> Image.Image:
+    im = Image.open(m.path)
+    im.load()
+    return im
+
+
+def _png_header_only(width: int, height: int) -> bytes:
+    """A PNG that declares ``width`` x ``height`` but carries one byte of
+    pixel data: what a decompression bomb looks like to ``Image.open``."""
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+# --- sniffing ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fmt", "expected", "kw"),
+    [
+        ("JPEG", "jpeg", {}),
+        ("PNG", "png", {}),
+        ("WEBP", "webp", {}),
+        ("TIFF", "tiff", {}),
+        ("BMP", "bmp", {}),
+        ("GIF", "gif", {}),
+    ],
+)
+def test_sniff_recognises_formats(fmt: str, expected: str, kw: dict) -> None:
+    data = encode(Image.new("RGB", (32, 24), (10, 120, 200)), fmt, **kw)
+    assert sniff_format(data) == expected
+
+
+def test_sniff_heic_and_heif_brands() -> None:
+    def ftyp(major: bytes, *compat: bytes) -> bytes:
+        body = major + b"\x00\x00\x00\x00" + b"".join(compat)
+        return struct.pack(">I", 8 + len(body)) + b"ftyp" + body + b"\x00" * 16
+
+    assert sniff_format(ftyp(b"heic", b"mif1", b"heic")) == "heif"
+    assert sniff_format(ftyp(b"mif1", b"heix")) == "heif"
+    assert sniff_format(ftyp(b"msf1", b"hevc")) == "heif"
+    assert sniff_format(ftyp(b"mif1", b"miaf")) == "heif"
+    with pytest.raises(UnsupportedImageType, match="AVIF"):
+        sniff_format(ftyp(b"avif", b"mif1", b"miaf"))
+    with pytest.raises(UnsupportedImageType):
+        sniff_format(ftyp(b"isom", b"mp41"))  # an MP4 video
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"hello, this is a text file pretending to be a jpg\n",
+        b"%PDF-1.7\n",
+        b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+        b"\xff\xd8",  # too short to be a JPEG
+        b"BMW service history, 2019-2026\n" * 4,  # "BM" but no DIB header
+        b"MM\x00 not quite a TIFF",
+    ],
+)
+def test_sniff_rejects_non_images(data: bytes) -> None:
+    with pytest.raises(UnsupportedImageType):
+        sniff_format(data)
+
+
+def test_text_file_named_jpg_is_unsupported(paths: DataPaths) -> None:
+    with pytest.raises(UnsupportedImageType) as exc:
+        ingest(b"just some text\n" * 100, "holiday.jpg", paths=paths)
+    assert exc.value.status == 415
+    assert list(paths.masters.iterdir()) == []
+
+
+# --- limits -------------------------------------------------------------------------------
+
+
+def test_30_mb_file_is_too_large(paths: DataPaths) -> None:
+    data = b"\xff\xd8\xff" + bytes(30 * 1024 * 1024)
+    with pytest.raises(UploadTooLarge) as exc:
+        ingest(data, "big.jpg", paths=paths)
+    assert exc.value.status == 413 and "25 MB" in str(exc.value)
+    assert list(paths.masters.iterdir()) == []
+
+
+def test_size_limit_is_inclusive(paths: DataPaths) -> None:
+    data = jpeg_bytes(Image.new("RGB", (60, 40), (1, 2, 3)))
+    assert ingest(data, "a.jpg", paths=paths, max_bytes=len(data)).width == 60
+    with pytest.raises(UploadTooLarge):
+        ingest(data, "a.jpg", paths=paths, max_bytes=len(data) - 1)
+
+
+def test_decompression_bomb_is_refused_before_decoding(paths: DataPaths) -> None:
+    # 400 MP: more than twice the limit, Pillow itself raises at open
+    with pytest.raises(UndecodableImage, match="decompression bomb") as exc:
+        ingest(_png_header_only(20000, 20000), "bomb.png", paths=paths)
+    assert exc.value.status == 422
+    # 63 MP: over the limit but under Pillow's, refused by our own check
+    with pytest.raises(UndecodableImage, match="63.0 MP"):
+        ingest(_png_header_only(9000, 7000), "bomb.png", paths=paths)
+    assert Image.MAX_IMAGE_PIXELS != masters.MAX_PIXELS
+
+
+def test_pillows_pixel_limit_is_never_changed(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Image.MAX_IMAGE_PIXELS is process-wide: another thread opening an image
+    # during an ingest must not see a different value
+    seen: list[int | None] = []
+    real_open = Image.open
+
+    def spy(*args: Any, **kw: Any) -> Image.Image:
+        seen.append(Image.MAX_IMAGE_PIXELS)
+        return real_open(*args, **kw)
+
+    default = Image.MAX_IMAGE_PIXELS
+    monkeypatch.setattr(Image, "open", spy)
+    ingest(encode(Image.new("RGB", (60, 40)), "PNG"), "a.png", paths=paths)
+    with pytest.raises(UndecodableImage, match="63.0 MP"):
+        ingest(_png_header_only(9000, 7000), "big.png", paths=paths)
+    assert len(seen) == 2 and set(seen) == {default}
+
+
+def test_decode_memory_guard(paths: DataPaths) -> None:
+    data = encode(Image.new("RGBA", (2000, 1500), (0, 0, 0, 0)), "PNG")
+    with pytest.raises(UndecodableImage, match="MB") as exc:
+        ingest(data, "a.png", paths=paths, max_decode_bytes=10_000_000)
+    assert exc.value.status == 422 and "2000 x 1500" in str(exc.value)
+    assert list(paths.masters.iterdir()) == []
+
+
+def test_png_budget_check_runs_before_load(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No PNG pixel is decoded for an image the budget refuses
+    (``PngImageFile.getexif()`` would decode it: the orientation is read
+    only after the check)."""
+    loads: list[tuple[int, int]] = []
+    real = PngImagePlugin.PngImageFile.load
+
+    def spy(self: PngImagePlugin.PngImageFile) -> object:
+        loads.append(self.size)
+        return real(self)
+
+    monkeypatch.setattr(PngImagePlugin.PngImageFile, "load", spy)
+    data = encode(Image.new("RGBA", (2000, 1500), (0, 0, 0, 0)), "PNG")
+    with pytest.raises(UndecodableImage, match="MB"):
+        ingest(data, "a.png", paths=paths, max_decode_bytes=10_000_000)
+    assert loads == [], "the PNG was decoded before the budget refused it"
+    # accepted: decoded once, and an eXIf chunk after the pixels still counts
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    trailing = _exif_after_idat(encode(Image.new("RGB", (60, 40)), "PNG", exif=exif.tobytes()))
+    m = ingest(trailing, "late-exif.png", paths=paths)
+    assert set(loads) == {(60, 40)} and (m.width, m.height) == (40, 60) and m.portrait
+
+
+def _exif_after_idat(png: bytes) -> bytes:
+    """``png`` with its eXIf chunk moved after the pixel data (legal, and what
+    makes ``PngImageFile.getexif()`` decode the whole image)."""
+    chunks, pos = [], 8
+    while pos < len(png):
+        (length,) = struct.unpack(">I", png[pos : pos + 4])
+        chunks.append(png[pos : pos + 12 + length])
+        pos += 12 + length
+    exif = [c for c in chunks if c[4:8] == b"eXIf"]
+    rest = [c for c in chunks if c[4:8] != b"eXIf"]
+    assert len(exif) == 1 and rest[-1][4:8] == b"IEND"
+    return png[:8] + b"".join(rest[:-1] + exif + rest[-1:])
+
+
+def test_decode_cost_model() -> None:
+    cost = masters.decode_cost
+    # never less than the image Pillow decodes into, plus the margin
+    for mode, per in (("L", 1), ("P", 1), ("I;16", 2), ("RGB", 4), ("RGBA", 4), ("LA", 4)):
+        assert cost(mode, (4000, 3000), "png") > 4000 * 3000 * per * masters._COST_MARGIN
+    # converting modes build the reduced copy strip by strip: a palette PNG is
+    # far cheaper than its RGBA expansion would be
+    assert cost("P", (8000, 6000), "png", transparency=True) < 8000 * 6000 * 2
+    # WebP: libwebp's two RGBA canvases and the frame's copy, ~17 bytes a pixel
+    assert cost("RGB", (3000, 2000), "webp") >= 3000 * 2000 * 17 * masters._COST_MARGIN
+    # decoder_bytes (a progressive JPEG's coefficients...) is added to the decode
+    held = 2856 * 2142 * 4 + 50_000_000
+    assert cost("RGB", (2856, 2142), "jpeg", decoder_bytes=50_000_000) > held * masters._COST_MARGIN
+    # HEIF: libheif's planes beside its RGB buffer
+    assert cost("RGB", (5712, 4284), "heif") > 5712 * 4284 * 4.5
+    # the default budget, the upload's bytes included: a 24 MP iPhone HEIC
+    # (measured +120 MB) fits; a 48 MP "HEIF Max" one (+235 MB), a 30 MP RGBA
+    # PNG, a 12 MP WebP and a 48 MP progressive JPEG do not
+    budget = masters.MAX_DECODE_BYTES
+    assert cost("RGB", (5712, 4284), "heif") + 3_000_000 <= budget
+    assert cost("RGB", (8064, 6048), "heif") > budget
+    assert cost("RGBA", (6700, 4470), "png") > budget
+    assert cost("RGB", (4000, 3000), "webp") > budget
+    progressive_48 = masters._jpeg_coefficient_bytes(
+        (8000, 6000), [(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)]
+    )
+    assert cost("RGB", (2000, 1500), "jpeg", decoder_bytes=progressive_48) > budget
+    # while every baseline phone JPEG is drafted and cheap
+    assert cost("RGB", (2016, 1512), "jpeg") < 60_000_000
+
+
+def test_jpeg_coefficient_buffer() -> None:
+    # 64 two-byte coefficients per 8 x 8 block of each component: 6 bytes a
+    # pixel at 4:4:4, 3 at 4:2:0, whatever the draft
+    full = [(1, 1, 1, 0), (2, 1, 1, 1), (3, 1, 1, 1)]
+    sub = [(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)]
+    assert masters._jpeg_coefficient_bytes((4800, 3600), full) == 4800 * 3600 * 6
+    assert masters._jpeg_coefficient_bytes((4800, 3600), sub) == 4800 * 3600 * 3
+    assert masters._jpeg_coefficient_bytes((4801, 3601), sub) > 4801 * 3601 * 3  # MCU padding
+    img = Image.new("RGB", (64, 48), (10, 20, 30))
+    for kw, buffered in (({}, False), ({"progressive": True}, True)):
+        data = jpeg_bytes(img, **kw)
+        assert masters._jpeg_buffers_coefficients(data) is buffered
+        with Image.open(io.BytesIO(data)) as im:
+            assert (masters.decoder_overhead(im, data) > 0) is buffered
+
+
+def _jpeg_headers(frame_components: int, scan_components: int, sof: int = 0xC0) -> bytes:
+    def seg(marker: int, payload: bytes) -> bytes:
+        return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
+
+    sof_payload = struct.pack(">BHHB", 8, 48, 64, frame_components) + b"\x01\x11\x00" * (
+        frame_components
+    )
+    sos_payload = bytes([scan_components]) + b"\x01\x00" * scan_components + b"\x00\x3f\x00"
+    return (
+        b"\xff\xd8"
+        + seg(0xE1, b"Exif\x00\x00" + b"\xff\xda" * 8)  # an SOS inside APP1 is skipped
+        + seg(sof, sof_payload)
+        + seg(0xDA, sos_payload)
+    )
+
+
+def test_jpeg_scan_layout_from_headers() -> None:
+    # a sequential frame whose first scan carries every component is decoded
+    # in one pass; a non-interleaved one (more scans follow), a progressive
+    # or a lossless frame makes libjpeg buffer every coefficient
+    assert masters._jpeg_buffers_coefficients(_jpeg_headers(3, 3)) is False
+    assert masters._jpeg_buffers_coefficients(_jpeg_headers(1, 1)) is False
+    assert masters._jpeg_buffers_coefficients(_jpeg_headers(3, 1)) is True
+    assert masters._jpeg_buffers_coefficients(_jpeg_headers(3, 3, sof=0xC2)) is True
+    assert masters._jpeg_buffers_coefficients(_jpeg_headers(3, 3, sof=0xC3)) is True
+    assert masters._jpeg_buffers_coefficients(b"\xff\xd8\x00garbage") is True
+
+
+def test_tiff_decoder_overhead() -> None:
+    img = Image.new("RGB", (400, 300), (1, 2, 3))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    plain = encode(img, "TIFF")
+    turned = encode(img, "TIFF", exif=exif.tobytes())
+    one_strip = encode(img, "TIFF", compression="tiff_adobe_deflate", strip_size=1 << 30)
+    with Image.open(io.BytesIO(plain)) as im:
+        assert masters.decoder_overhead(im, plain) == 0  # raw strips: no libtiff buffer
+    with Image.open(io.BytesIO(turned)) as im:
+        # Pillow transposes the loaded image in place: a second full-size image
+        assert masters.decoder_overhead(im, turned) == 400 * 300 * 4
+    with Image.open(io.BytesIO(one_strip)) as im:
+        assert masters.decoder_overhead(im, one_strip) == 400 * 300 * 4  # the whole-image strip
+
+
+@pytest.mark.parametrize(("mode", "factor"), [("RGB", 3), ("RGBA", 2), ("L", 4), ("RGB", 1)])
+def test_reduce_rows_matches_a_whole_image_reduce(
+    monkeypatch: pytest.MonkeyPatch, mode: str, factor: int
+) -> None:
+    w, h, bands = 301, 257, len(mode)
+    stride = w * bands + 7  # padded rows, like libheif's
+    rng = np.random.default_rng(3)
+    raw = rng.integers(0, 256, h * stride, dtype=np.uint8).tobytes()
+    monkeypatch.setattr(masters, "_STRIP_BYTES", 5 * stride)  # many strips
+    got = masters.reduce_rows(raw, mode, (w, h), stride, factor)
+    want = Image.frombytes(mode, (w, h), raw, "raw", mode, stride)
+    if factor > 1:
+        want = want.reduce(factor)
+    assert got.mode == mode and got.size == want.size
+    assert np.array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_truncated_jpeg_is_undecodable(paths: DataPaths) -> None:
+    data = jpeg_bytes()
+    with pytest.raises(UndecodableImage) as exc:
+        ingest(data[: len(data) // 2], "cut.jpg", paths=paths)
+    assert exc.value.status == 422
+    assert list(paths.masters.iterdir()) == []
+
+
+def test_garbage_after_valid_magic_is_undecodable(paths: DataPaths) -> None:
+    with pytest.raises(UndecodableImage):
+        ingest(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200, "x.png", paths=paths)
+    with pytest.raises(UndecodableImage):
+        ingest(b"\xff\xd8\xff\xe0" + b"\x13" * 500, "x.jpg", paths=paths)
+
+
+# --- decoding and geometry --------------------------------------------------------------------
+
+
+def test_large_jpeg_becomes_1800_wide_master(paths: DataPaths) -> None:
+    m = ingest(jpeg_bytes(), "gradient.jpg", paths=paths)
+    assert (m.width, m.height) == (1800, 1200) and m.portrait is False
+    assert m.path == paths.masters / f"{m.id}.jpg" and m.path.is_file()
+    assert m.relative_path == f"masters/{m.id}.jpg"
+    assert m.bytes == m.path.stat().st_size
+    assert m.source_format == "jpeg"
+    im = _open_master(m)
+    assert im.format == "JPEG" and im.mode == "RGB" and im.size == (1800, 1200)
+    assert "exif" not in im.info and "icc_profile" not in im.info
+    assert "progressive" not in im.info and "progression" not in im.info
+    # the patches survive: the nominal red patch at its scaled position
+    x = round((3 * (2400 // 6) + 2400 // 32 + 10) * 0.75)
+    y = round((1600 // 10 + 20) * 0.75)
+    r, g, b = im.getpixel((x, y))
+    assert r > 200 and g < 50 and b < 50
+
+
+def test_small_images_are_never_upscaled(paths: DataPaths) -> None:
+    m = ingest(jpeg_bytes(Image.new("RGB", (320, 200), (50, 60, 70))), "s.jpg", paths=paths)
+    assert (m.width, m.height) == (320, 200)
+
+
+def test_portrait_jpeg(paths: DataPaths) -> None:
+    img = gradient_image(800, 1200)
+    m = ingest(jpeg_bytes(img), "portrait.jpg", paths=paths)
+    assert (m.width, m.height) == (800, 1200) and m.portrait is True
+
+
+def test_exif_orientation_is_applied(paths: DataPaths) -> None:
+    a = np.full((400, 600, 3), 200, np.uint8)
+    a[:80, :120] = (255, 0, 0)  # a red block in the stored image's top-left corner
+    exif = Image.Exif()
+    exif[0x0112] = 6  # "rotate 90 CW to display"
+    data = jpeg_bytes(Image.fromarray(a), quality=95, exif=exif.tobytes())
+    m = ingest(data, "rotated.jpg", paths=paths)
+    assert (m.width, m.height) == (400, 600) and m.portrait is True
+    im = _open_master(m)
+    assert "exif" not in im.info  # orientation applied, metadata dropped
+    top_right = im.getpixel((400 - 20, 20))
+    top_left = im.getpixel((20, 20))
+    assert top_right[0] > 200 and top_right[1] < 60  # red moved to the top right
+    assert top_left[0] < 230 and abs(top_left[0] - top_left[1]) < 30  # grey stays grey
+
+
+#: every format whose EXIF orientation Inkframe applies (HEIF: libheif does)
+_ORIENTED = {
+    "PNG": {},
+    "JPEG": {"quality": 95, "subsampling": 0},
+    "WEBP": {"lossless": True},
+    "TIFF": {},  # Pillow turns a TIFF itself while loading it: exactly once in all
+}
+
+
+@pytest.mark.parametrize("orientation", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("fmt", list(_ORIENTED))
+def test_every_orientation_matches_exif_transpose(
+    paths: DataPaths, fmt: str, orientation: int
+) -> None:
+    a = np.full((40, 60, 3), 128, np.uint8)
+    a[:10, :20] = (255, 0, 0)  # red in the stored top-left corner
+    a[-10:, -6:] = (0, 0, 255)  # blue in the stored bottom-right one
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    data = encode(Image.fromarray(a), fmt, exif=exif.tobytes(), **_ORIENTED[fmt])
+    m = ingest(data, f"o.{fmt.lower()}", paths=paths)
+    expected = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    assert (m.width, m.height) == expected.size
+    assert m.portrait is (expected.size[1] > expected.size[0])
+    got = np.asarray(_open_master(m), dtype=np.int16)
+    want = np.asarray(expected, dtype=np.int16)
+    assert np.abs(got - want).mean() < 6  # identical up to JPEG noise
+
+
+@pytest.mark.parametrize("orientation", [2, 3, 6, 8])
+def test_tiff_orientation_is_applied_exactly_once(paths: DataPaths, orientation: int) -> None:
+    # Pillow's TIFF plugin runs exif_transpose in load_end and reports the
+    # turned size at open; turning it again would undo or double it
+    a = np.full((30, 60, 3), 128, np.uint8)
+    a[:10, :15] = (255, 0, 0)
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    for kw in ({}, {"compression": "tiff_adobe_deflate"}):  # raw and libtiff decoders
+        data = encode(Image.fromarray(a), "TIFF", exif=exif.tobytes(), **kw)
+        m = ingest(data, "o.tif", paths=paths)
+        want = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+        assert (m.width, m.height) == want.size
+        assert m.portrait is (want.size[1] > want.size[0])
+        got = np.asarray(_open_master(m), dtype=np.int16)
+        assert np.abs(got - np.asarray(want, dtype=np.int16)).mean() < 6
+
+
+def test_png_alpha_is_composited_on_white(paths: DataPaths) -> None:
+    a = np.zeros((300, 400, 4), np.uint8)
+    a[:, 200:] = (220, 20, 30, 255)  # opaque red right half
+    a[:, :200] = (0, 0, 0, 0)  # transparent (black) left half
+    m = ingest(encode(Image.fromarray(a), "PNG"), "alpha.png", paths=paths)
+    im = _open_master(m)
+    assert im.mode == "RGB"
+    left = im.getpixel((50, 150))
+    right = im.getpixel((350, 150))
+    assert min(left) >= 250  # white, not black
+    assert right[0] > 200 and right[1] < 50
+
+
+def test_large_rgba_png_reduces_without_dark_fringes(paths: DataPaths) -> None:
+    # 7400 x 2000 is box-reduced 4x before the Lanczos step.  The edge at
+    # x = 3702 splits a 4-pixel block between transparent black and opaque
+    # green: averaged without premultiplying, that block would come out a
+    # dark grey-green; composited properly it is half green, half white, and
+    # every pixel of the master lies on the line from white to the green
+    green = np.array([40, 160, 60])
+    im = Image.new("RGBA", (7400, 2000), (0, 0, 0, 0))
+    im.paste((*green.tolist(), 255), (3702, 0, 7400, 2000))
+    data = encode(im, "PNG")
+    master = masters.decode_master(data, "png")  # before JPEG noise
+    assert master.size == (1800, 486)
+    arr = np.asarray(master, dtype=np.float64)
+    assert arr[:, :880].min() >= 254  # white where it was transparent
+    assert np.abs(arr[:, 920:] - green).max() <= 1  # the green, untouched
+    t = (255 - arr) / (255 - green)  # how far towards the green, per channel
+    assert np.abs(t[..., 0] - t[..., 1]).max() < 0.05
+    assert np.abs(t[..., 2] - t[..., 1]).max() < 0.05
+    edge = t[:, 895:906, 1]
+    assert ((edge > 0.2) & (edge < 0.8)).any()  # the half-covered block is there
+    m = ingest(data, "huge.png", paths=paths)
+    assert (m.width, m.height) == (1800, 486)
+
+
+@pytest.mark.parametrize("mode", ["RGB", "L"])
+def test_png_trns_colour_key_is_composited_on_white(paths: DataPaths, mode: str) -> None:
+    a = np.full((40, 60, 3), 200, np.uint8)
+    a[:, :30] = 0  # the left half is the transparent key colour
+    im = Image.fromarray(a).convert(mode)
+    data = encode(im, "PNG", transparency=(0, 0, 0) if mode == "RGB" else 0)
+    m = ingest(data, "key.png", paths=paths)
+    out = _open_master(m).convert("RGB")
+    assert min(out.getpixel((10, 20))) >= 245, "transparent pixels must be white"
+    assert all(abs(c - 200) <= 4 for c in out.getpixel((50, 20)))
+
+
+def test_16_bit_png_trns_colour_key(paths: DataPaths) -> None:
+    a = np.full((40, 60), 40000, np.uint16)
+    a[:, :30] = 1234  # the 16-bit key
+    data = encode(Image.fromarray(a), "PNG", transparency=1234)
+    out = np.asarray(_open_master(ingest(data, "key16.png", paths=paths)), dtype=np.int16)
+    assert out[20, 10].min() >= 245  # transparent: white
+    assert abs(int(out[20, 50, 0]) - round(40000 / 257)) <= 4  # scaled, not clipped
+
+
+@pytest.mark.parametrize(
+    ("mode", "info"),
+    [
+        ("P", {"transparency": 0}),
+        ("P", {}),
+        ("RGBA", {}),
+        ("LA", {}),
+        ("RGB", {"transparency": (0, 0, 0)}),
+        ("I;16", {}),
+        ("1", {}),
+        ("RGB", {}),
+    ],
+)
+@pytest.mark.parametrize("factor", [1, 3])
+def test_normalise_in_strips_equals_the_whole_image(
+    monkeypatch: pytest.MonkeyPatch, mode: str, info: dict, factor: int
+) -> None:
+    rng = np.random.default_rng(5)
+    rgba = rng.integers(0, 256, (97, 131, 4), dtype=np.uint8)
+    rgba[..., 3] = np.where(rng.random((97, 131)) < 0.3, 0, rgba[..., 3])
+    src = Image.fromarray(rgba, "RGBA")
+    if mode == "P":
+        im = src.convert("RGB").quantize(16)
+    elif mode == "I;16":
+        im = Image.fromarray(np.asarray(src.convert("L"), dtype=np.uint16) * 257)
+    else:
+        im = src.convert(mode)
+    im.info.update(info)
+    monkeypatch.setattr(masters, "_STRIP_PIXELS", 7 * 131)  # many strips
+    got = masters.normalise(im, factor)
+    whole = masters._flatten_alpha(masters._to_8bit(im))
+    want = whole.reduce(factor) if factor > 1 else whole
+    assert got.mode == want.mode and got.mode in ("L", "RGB")
+    assert np.array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_huge_jpeg_is_drafted(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    im = Image.new("RGB", (7400, 4000), (30, 90, 200))
+    im.paste((250, 220, 40), (0, 0, 3700, 4000))
+    seen: list[tuple[str, tuple[int, int]]] = []
+    real = masters.decode_cost
+
+    def spy(mode: str, size: tuple[int, int], fmt: str, *args: object, **kw: object) -> int:
+        seen.append((mode, size))
+        return real(mode, size, fmt, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(masters, "decode_cost", spy)
+    m = ingest(jpeg_bytes(im, quality=80), "huge.jpg", paths=paths)
+    assert seen == [("RGB", (1850, 1000))]  # libjpeg decoded at 1/4 scale
+    assert (m.width, m.height) == (1800, 973)
+    left, right = _open_master(m).getpixel((100, 500)), _open_master(m).getpixel((1700, 500))
+    assert left[0] > 230 and right[2] > 180
+
+
+def test_draft_size() -> None:
+    assert masters._draft_size((2400, 1600), MASTER_LONG_EDGE) is None
+    assert masters._draft_size((3500, 2000), MASTER_LONG_EDGE) is None  # 1/2 would undershoot
+    assert masters._draft_size((8000, 6000), MASTER_LONG_EDGE) == (1800, 1350)
+    assert masters._draft_size((6000, 8000), MASTER_LONG_EDGE) == (1350, 1800)
+
+
+@pytest.mark.parametrize(
+    ("size", "decoded"),
+    [((5712, 4284), (2856, 2142)), ((8064, 6048), (2016, 1512)), ((4000, 3000), (2000, 1500))],
+)
+def test_phone_jpegs_decode_at_or_above_master_size(
+    paths: DataPaths, size: tuple[int, int], decoded: tuple[int, int]
+) -> None:
+    im = Image.open(io.BytesIO(jpeg_bytes(Image.new("RGB", size, (90, 90, 90)), quality=50)))
+    req = masters._draft_size(im.size, MASTER_LONG_EDGE)
+    assert req is not None
+    im.draft("RGB", req)
+    assert im.size == decoded and max(decoded) >= MASTER_LONG_EDGE
+
+
+def test_webp(paths: DataPaths) -> None:
+    m = ingest(encode(gradient_image(1200, 800), "WEBP", quality=90), "a.webp", paths=paths)
+    assert (m.width, m.height) == (1200, 800) and m.source_format == "webp"
+
+
+def test_heic(paths: DataPaths) -> None:
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    src = gradient_image(1200, 800)
+    data = heic_bytes(src, quality=90, exif=exif.tobytes())
+    assert data[4:12] == b"ftypheic"
+    m = ingest(data, "IMG_0001.HEIC", paths=paths)
+    # pillow-heif stores the orientation as a HEIF transform that libheif
+    # applies on decode; the master is upright and turned exactly once
+    assert (m.width, m.height) == (800, 1200) and m.portrait is True
+    assert m.source_format == "heif" and m.original_name == "IMG_0001.HEIC"
+    got = np.asarray(_open_master(m), dtype=np.int16)
+    want = np.asarray(src.transpose(Image.Transpose.ROTATE_270), dtype=np.int16)
+    assert np.abs(got - want).mean() < 6
+
+
+def test_large_heic_is_box_reduced_in_strips(paths: DataPaths) -> None:
+    src = gradient_image(3700, 2000)
+    data = heic_bytes(src, quality=90)
+    m = ingest(data, "big.heic", paths=paths)
+    assert (m.width, m.height) == (1800, 973)
+    # the same picture as Pillow's plugin decoding it whole, then Lanczos
+    with Image.open(io.BytesIO(data)) as whole:
+        want = whole.convert("RGB").resize((1800, 973), Image.Resampling.LANCZOS)
+    got = np.asarray(_open_master(m), dtype=np.int16)
+    assert np.abs(got - np.asarray(want, dtype=np.int16)).mean() < 3
+
+
+def test_gif_with_transparency(paths: DataPaths) -> None:
+    im = Image.new("P", (80, 60), 0)
+    im.putpalette([0, 0, 0, 255, 0, 0] + [0] * 762)
+    im.paste(1, (40, 0, 80, 60))
+    data = encode(im, "GIF", transparency=0)
+    m = ingest(data, "a.gif", paths=paths)
+    out = _open_master(m)
+    assert min(out.getpixel((10, 30))) >= 250  # transparent -> white
+    assert out.getpixel((70, 30))[0] > 200
+
+
+def test_16_bit_grey_png_is_scaled_not_clipped(paths: DataPaths) -> None:
+    a = np.zeros((40, 60), np.uint16)
+    a[:, 20:40] = 32896  # ~ 50 %
+    a[:, 40:] = 65535
+    im = Image.fromarray(a)
+    assert im.mode.startswith("I;16")
+    m = ingest(encode(im, "PNG"), "deep.png", paths=paths)
+    arr = np.asarray(_open_master(m), dtype=np.int16)
+    assert arr[20, 5].max() < 8 and abs(int(arr[20, 30, 0]) - 128) < 8 and arr[20, 55].min() > 247
+
+
+def test_cmyk_jpeg_and_bmp_and_tiff(paths: DataPaths) -> None:
+    cmyk = Image.new("CMYK", (90, 60), (0, 255, 255, 0))  # red
+    m = ingest(jpeg_bytes(cmyk), "cmyk.jpg", paths=paths)
+    r, g, b = _open_master(m).getpixel((45, 30))
+    assert r > 200 and g < 60 and b < 60
+    for fmt in ("BMP", "TIFF"):
+        m = ingest(encode(Image.new("RGB", (90, 60), (0, 0, 255)), fmt), f"a.{fmt}", paths=paths)
+        assert _open_master(m).getpixel((45, 30))[2] > 230
+
+
+def test_icc_profile_is_honoured_or_ignored(paths: DataPaths) -> None:
+    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    img = Image.new("RGB", (90, 60), (200, 40, 40))
+    m = ingest(jpeg_bytes(img, quality=95, icc_profile=srgb), "srgb.jpg", paths=paths)
+    out = _open_master(m)
+    assert "icc_profile" not in out.info
+    assert all(abs(a - b) <= 4 for a, b in zip(out.getpixel((45, 30)), (200, 40, 40), strict=True))
+    m = ingest(jpeg_bytes(img, icc_profile=b"not a profile" * 20), "bad.jpg", paths=paths)
+    assert all(
+        abs(a - b) <= 4
+        for a, b in zip(_open_master(m).getpixel((45, 30)), (200, 40, 40), strict=True)
+    )
+
+
+def test_ids_and_delete(paths: DataPaths) -> None:
+    m = ingest(jpeg_bytes(Image.new("RGB", (60, 40))), "a.jpg", paths=paths, photo_id="ab" * 16)
+    assert m.id == "ab" * 16 and m.path.name == f"{'ab' * 16}.jpg"
+    assert masters.delete_master(paths, m.id) is True
+    assert not m.path.exists()
+    assert masters.delete_master(paths, m.id) is False
+    fresh = ingest(jpeg_bytes(Image.new("RGB", (60, 40))), "b.jpg", paths=paths)
+    assert len(fresh.id) == 32 and int(fresh.id, 16) >= 0
+    assert [p.name for p in paths.masters.iterdir()] == [f"{fresh.id}.jpg"]  # no temp files left
+
+
+@pytest.mark.parametrize(
+    "bad", ["../evil", "..", "/etc/passwd", "AB" * 16, "ab" * 15, "ab" * 16 + "/x", "", None]
+)
+def test_ids_never_become_paths(paths: DataPaths, bad: object) -> None:
+    data = jpeg_bytes(Image.new("RGB", (60, 40)))
+    with pytest.raises(ValueError, match="photo id"):
+        ingest(data, "a.jpg", paths=paths, photo_id=bad or "x")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="photo id"):
+        masters.master_path(paths, bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="photo id"):
+        masters.delete_master(paths, bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="photo id"):
+        masters.master_relpath(bad)  # type: ignore[arg-type]
+    assert list(paths.masters.iterdir()) == []
+
+
+def test_masters_are_never_replaced(paths: DataPaths) -> None:
+    # render keys leave the master out because a master never changes
+    m = ingest(jpeg_bytes(Image.new("RGB", (60, 40), (1, 2, 3))), "a.jpg", paths=paths)
+    before = m.path.read_bytes()
+    with pytest.raises(FileExistsError):
+        ingest(
+            jpeg_bytes(Image.new("RGB", (60, 40), (9, 9, 9))), "b.jpg", paths=paths, photo_id=m.id
+        )
+    assert m.path.read_bytes() == before
+
+
+# --- names --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("IMG_1234.HEIC", "IMG_1234.HEIC"),
+        ("C:\\Users\\adam\\Pictures\\beach.jpg", "beach.jpg"),
+        ("../../etc/passwd", "passwd"),
+        ("bad\x00name\x1b[31m.jpg", "badname[31m.jpg"),
+        ("  lots   of\tspace .png ", "lots of space .png"),
+        ("\u202egnp.exe", "gnp.exe"),  # right-to-left override stripped
+        ("", "photo"),
+        (None, "photo"),
+        ("\x00\x01", "photo"),
+    ],
+)
+def test_sanitize_name(raw: object, clean: str) -> None:
+    assert sanitize_name(raw) == clean
+
+
+def test_sanitize_name_truncates_keeping_extension() -> None:
+    name = "a" * 300 + ".jpeg"
+    out = sanitize_name(name)
+    assert len(out) == masters.MAX_NAME_CHARS and out.endswith(".jpeg")
+    assert len(sanitize_name("b" * 300)) == masters.MAX_NAME_CHARS
+
+
+# --- MPO: a JPEG whose MPF segment lists more images ------------------------------------
+
+
+def _mpo(image: Image.Image, **kw: Any) -> bytes:
+    """``image`` as an MPO: a JPEG with an MPF segment and a second image
+    after it, which is how phones store previews and gain maps."""
+    return encode(image, "MPO", save_all=True, append_images=[image.resize((64, 48))], **kw)
+
+
+def test_progressive_mpo_counts_its_coefficient_buffer() -> None:
+    # Pillow's JPEG factory opens a JPEG whose MPF segment lists two or more
+    # images as an MpoImageFile (format "MPO"); its primary image goes
+    # through the same libjpeg path, coefficient buffer included
+    im = gradient_image(640, 480)
+    plain = encode(im, "JPEG", quality=85, progressive=True, subsampling=0)
+    mpo = _mpo(im, quality=85, progressive=True, subsampling=0)
+    with Image.open(io.BytesIO(plain), formats=["JPEG"]) as opened:
+        expected = masters.decoder_overhead(opened, plain)
+    assert expected == 640 * 480 * 6  # 4:4:4
+    with Image.open(io.BytesIO(mpo), formats=["JPEG"]) as opened:
+        assert opened.format == "MPO"
+        assert masters.decoder_overhead(opened, mpo) == expected
+    baseline = _mpo(im, quality=85)
+    with Image.open(io.BytesIO(baseline), formats=["JPEG"]) as opened:
+        assert opened.format == "MPO" and masters.decoder_overhead(opened, baseline) == 0
+
+
+def test_large_mpo_is_drafted(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    im = Image.new("RGB", (7400, 4000), (30, 90, 200))
+    im.paste((250, 220, 40), (0, 0, 3700, 4000))
+    seen: list[tuple[str, tuple[int, int], object]] = []
+    real = masters.decode_cost
+
+    def spy(mode: str, size: tuple[int, int], fmt: str, *args: Any, **kw: Any) -> int:
+        seen.append((mode, size, kw.get("decoder_bytes")))
+        return real(mode, size, fmt, *args, **kw)
+
+    monkeypatch.setattr(masters, "decode_cost", spy)
+    m = ingest(_mpo(im, quality=80), "phone.jpg", paths=paths)
+    assert seen == [("RGB", (1850, 1000), 0)]  # libjpeg at 1/4 scale, no coefficient buffer
+    assert m.source_format == "jpeg" and (m.width, m.height) == (1800, 973)
+    assert _open_master(m).getpixel((100, 500))[0] > 230
+
+
+# --- decoders that run in Python --------------------------------------------------------
+
+
+def _rle8_bmp(width: int, height: int) -> bytes:
+    """An 8-bit RLE BMP whose rows are an 8-pixel run of grey 200 and an
+    end-of-line: a tiny file that makes Pillow's Python decoder pad
+    ``width - 8`` bytes a row, one loop step at a time."""
+    palette = b"".join(bytes((i, i, i, 0)) for i in range(256))
+    pixels = b"\x08\xc8\x00\x00" * height + b"\x00\x01"
+    offset = 14 + 40 + len(palette)
+    file_header = struct.pack("<2sIHHI", b"BM", offset + len(pixels), 0, 0, offset)
+    dib = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 8, 1, len(pixels), 2835, 2835, 256, 0)
+    return file_header + dib + palette + pixels
+
+
+def test_rle_bmp_is_limited(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    decoded: list[int] = []
+    real = BmpImagePlugin.BmpRleDecoder.decode
+
+    def spy(self: BmpImagePlugin.BmpRleDecoder, buffer: Any) -> tuple[int, int]:
+        decoded.append(1)
+        return real(self, buffer)
+
+    monkeypatch.setattr(BmpImagePlugin.BmpRleDecoder, "decode", spy)
+    m = ingest(_rle8_bmp(300, 200), "small.bmp", paths=paths)
+    out = np.asarray(_open_master(m).convert("L"), dtype=np.int16)
+    assert (m.width, m.height) == (300, 200) and out[100, 2] > 170 and out[100, 150] < 30
+    assert decoded == [1]
+    side = int(masters.MAX_RLE_BMP_PIXELS**0.5) + 1  # 2001 x 2001: a 9 KB file
+    t0 = time.perf_counter()
+    with pytest.raises(UndecodableImage, match="RLE") as exc:
+        ingest(_rle8_bmp(side, side), "big.bmp", paths=paths)
+    assert exc.value.status == 422 and time.perf_counter() - t0 < 1
+    assert decoded == [1]  # refused before the decoder ran
+
+
+def test_float_tiff_is_scaled_from_0_to_1(paths: DataPaths) -> None:
+    ramp = np.tile(np.linspace(0, 1, 90, dtype=np.float32), (60, 1))
+    for samples in (ramp, ramp * 255):  # 0..1 is scaled; anything else is taken as 0..255
+        im = Image.fromarray(samples)
+        assert im.mode == "F"
+        m = ingest(encode(im, "TIFF"), "float.tif", paths=paths)
+        grey = np.asarray(_open_master(m).convert("L"), dtype=np.int16)
+        assert grey[30, 0] < 10 and grey[30, -1] > 245 and abs(int(grey[30, 45]) - 128) < 10
+
+
+def test_compressed_tiff_decodes_without_copying_the_file() -> None:
+    # libtiff's in-memory path decodes from fp.getvalue(); a BytesIO made from
+    # bytes shares them, so the budget is right to count the upload once
+    noise = np.random.default_rng(2).integers(0, 256, (600, 800, 3), dtype=np.uint8)
+    data = encode(Image.fromarray(noise), "TIFF", compression="tiff_adobe_deflate")
+    assert len(data) > 1_000_000
+    with Image.open(io.BytesIO(data), formats=["TIFF"]) as im:
+        tracemalloc.start()
+        try:
+            im.load()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+# --- header structure ------------------------------------------------------------------------
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+
+def _png_with(before: Sequence[bytes] = (), after: Sequence[bytes] = ()) -> bytes:
+    """A 64 x 48 RGB PNG with extra chunks before and after its pixel data."""
+    png = encode(Image.new("RGB", (64, 48), (9, 90, 200)), "PNG")
+    pixels = 8 + 25  # after the signature and IHDR
+    iend = png.rindex(b"IEND") - 4
+    return png[:pixels] + b"".join(before) + png[pixels:iend] + b"".join(after) + png[iend:]
+
+
+def _gif_with(blocks: bytes) -> bytes:
+    """A 16 x 16 GIF with ``blocks`` (extensions) before its image."""
+    gif = encode(Image.new("P", (16, 16)), "GIF")
+    flags = gif[10]
+    head = 13 + (3 << ((flags & 7) + 1) if flags & 0x80 else 0)
+    return gif[:head] + blocks + gif[head:]
+
+
+def _gif_comment(size: int) -> bytes:
+    full, rest = divmod(size, 255)
+    body = (b"\xff" + b"c" * 255) * full + (bytes([rest]) + b"c" * rest if rest else b"")
+    return b"\x21\xfe" + body + b"\x00"
+
+
+def test_png_text_is_counted(paths: DataPaths) -> None:
+    # Pillow keeps every text chunk's value in info/text until the master is
+    # encoded, and a zTXt chunk of 1 KB inflates to its 1 MB limit
+    bomb = zlib.compress(b"B" * 1_000_000, 9)
+    notes = [_png_chunk(b"zTXt", b"note%02d\x00\x00" % i + bomb) for i in range(20)]
+    data = _png_with(before=notes[:10], after=notes[10:])
+    meta = masters.scan_metadata(data, "png")
+    assert meta.retained >= 20 * 1_000_000 and len(data) < 50_000
+    with pytest.raises(UndecodableImage, match="metadata"):
+        ingest(data, "notes.png", paths=paths, max_decode_bytes=20_000_000)
+    m = ingest(data, "notes.png", paths=paths)  # the default budget has room for it
+    assert (m.width, m.height) == (64, 48)
+    # counted for every stage, not only the decode
+    cost = masters.decode_cost
+    assert cost("RGB", (64, 48), "png", retained_bytes=meta.retained) > meta.retained
+    assert masters.scan_metadata(encode(Image.new("RGB", (8, 8)), "PNG"), "png") == (
+        masters.Metadata()
+    )
+
+
+def test_png_metadata_scan() -> None:
+    def scan(*chunks: bytes) -> masters.Metadata:
+        return masters.scan_metadata(_png_with(before=list(chunks)), "png")
+
+    text = scan(_png_chunk(b"tEXt", b"Comment\x00" + b"x" * 5000))
+    assert 5000 <= text.retained <= 4 * 5000 and text.transient >= 2 * 5000
+    # UTF-8 iTXt becomes a str of up to 4 bytes a character
+    plain = scan(_png_chunk(b"iTXt", b"Desc\x00\x00\x00\x00\x00" + b"x" * 5000))
+    wide = scan(
+        _png_chunk(b"iTXt", b"Desc\x00\x00\x00\x00\x00" + b"x" * 5000 + "\U0001f600".encode())
+    )
+    assert wide.retained > 3 * plain.retained
+    zipped = scan(_png_chunk(b"iTXt", b"Desc\x00\x01\x00\x00\x00" + zlib.compress(b"x" * 5000)))
+    assert zipped.retained >= 5000
+    # private chunks are kept whole; APNG's own are not
+    assert scan(_png_chunk(b"prVt", b"p" * 5000)).retained >= 5000
+    assert scan(_png_chunk(b"fcTL", b"\x00" * 26)).retained == 0
+
+
+def test_header_floods_are_refused_before_pillow_parses_them(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pillow parses these headers in Python, one item at a time, inside
+    # Image.open: a 25 MB JPEG of empty APP1 segments would take seconds and
+    # keep ~750 MB of objects before any check after the open could run
+    opened: list[object] = []
+    real_open = Image.open
+
+    def spy(*args: Any, **kw: Any) -> Image.Image:
+        opened.append(kw.get("formats"))
+        return real_open(*args, **kw)
+
+    monkeypatch.setattr(Image, "open", spy)
+    monkeypatch.setattr(masters, "MAX_HEADER_STEPS", 500)
+    jpeg = jpeg_bytes(Image.new("RGB", (16, 16), (200, 10, 10)))
+    first = 4 + int.from_bytes(jpeg[4:6], "big")  # after the APP0 segment
+    floods = {
+        "APP1": jpeg[:2] + b"\xff\xe1\x00\x02" * 501 + jpeg[2:],
+        "junk": jpeg[:first] + b"\x00" * 501 + jpeg[first:],
+        "chunks": _png_with(before=[_png_chunk(b"tEXt", b"k%04d\x00" % i) for i in range(501)]),
+        "gif": _gif_with(b"\x21\xfe\x00" * 501),
+    }
+    for label, data in floods.items():
+        with pytest.raises(UndecodableImage, match="more than 500") as exc:
+            ingest(data, label, paths=paths)
+        assert exc.value.status == 422, label
+    assert opened == []
+    # a few hundred are fine
+    ingest(jpeg[:2] + b"\xff\xe1\x00\x02" * 400 + jpeg[2:], "ok.jpg", paths=paths)
+    ingest(jpeg[:first] + b"\x00" * 400 + jpeg[first:], "ok.jpg", paths=paths)
+    assert len(opened) == 2
+
+
+def test_gif_comments_are_limited(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pillow joins a comment one 255-byte block at a time: quadratic in its
+    # length (a 4 MB comment takes 5 s on the desktop, 25 MB would take minutes)
+    monkeypatch.setattr(masters, "MAX_GIF_COMMENT_COPY", 1_000_000)
+    with pytest.raises(UndecodableImage, match="comments"):
+        ingest(_gif_with(_gif_comment(50_000)), "long.gif", paths=paths)  # ~5 MB copied
+    data = _gif_with(_gif_comment(5_000) + _gif_comment(300))
+    assert masters.scan_metadata(data, "gif").retained == 5_301  # joined with a newline
+    m = ingest(data, "short.gif", paths=paths)
+    assert (m.width, m.height) == (16, 16)
+
+
+def test_jpeg_metadata_is_counted() -> None:
+    exif = Image.Exif()
+    exif[0x010E] = "x" * 20_000  # ImageDescription
+    data = jpeg_bytes(Image.new("RGB", (16, 16)), exif=exif.tobytes())
+    assert masters.scan_metadata(data, "jpeg").retained >= 2 * 20_000
+    assert masters.scan_metadata(jpeg_bytes(Image.new("RGB", (16, 16))), "jpeg").retained < 1_000

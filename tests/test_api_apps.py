@@ -22,6 +22,7 @@ from inkframe.apps.base import RenderContext
 from inkframe.display.mock import MockDisplay
 from inkframe.display.palette import MEASURED_DEFAULT
 from inkframe.scheduler import local_now
+from tests.conftest import gradient_image, jpeg_bytes
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APP_IDS = ["photos", "weather", "headlines", "patterns", "quotes"]
@@ -231,8 +232,13 @@ def test_preview_runs_on_the_render_thread(client: TestClient) -> None:
 def test_photos_preview_uses_the_current_photo(client: TestClient) -> None:
     db = client.app.state.db
     empty = _png(client.get("/api/apps/photos/preview.png"))  # the "no photos" card
-    for name in ("first.jpg", "second.jpg"):
-        db.add_photo(original_name=name, width=1800, height=1200, master_path="m", master_bytes=1)
+    for name, image in (
+        ("first.jpg", gradient_image(600, 400)),
+        ("second.jpg", gradient_image(600, 400).transpose(Image.Transpose.FLIP_LEFT_RIGHT)),
+    ):
+        data = jpeg_bytes(image)
+        r = client.post("/api/photos", files={"file": (name, data, "image/jpeg")})
+        assert r.status_code == 201, r.text
     second = db.list_photos()[1]
     one = _png(client.get("/api/apps/photos/preview.png"))  # nothing current: the first photo
     assert one.tobytes() != empty.tobytes()

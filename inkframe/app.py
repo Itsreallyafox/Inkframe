@@ -50,6 +50,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from inkframe import __version__
 from inkframe.api import apps as apps_api
 from inkframe.api import display as display_api
+from inkframe.api import photos as photos_api
+from inkframe.api import recipe as recipe_api
 from inkframe.api import rotation as rotation_api
 from inkframe.api import settings as settings_api
 from inkframe.api import system as system_api
@@ -195,6 +197,8 @@ def create_app(
     app.include_router(display_api.router)
     app.include_router(rotation_api.router)
     app.include_router(apps_api.router)
+    app.include_router(photos_api.router)
+    app.include_router(recipe_api.router)
     app.mount("/static", _RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
 
     # HEAD too: FastAPI's @get, unlike a plain Starlette Route, does not add it
