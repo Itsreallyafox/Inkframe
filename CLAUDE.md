@@ -5,12 +5,12 @@ Raspberry Pi Zero 2 W (FastAPI + a scheduler thread + a one-thread render worker
 no-build web UI and is the only thing that drives a Waveshare 4inch e-Paper HAT+ (E)
 (600 x 400, ~19 s full refresh, no partial refresh). No auth, by design. README.md is the
 user guide; docs/ holds design notes (DEPLOY, SCHEDULER, PIPELINE, DITHER, UI) and ROUGH_EDGES.md
-(what is still open); INKFRAME_PLAN.md (outside the repo, `C:\Users\Itsre\Desktop\`)
+(what is still open); INKFRAME_PLAN.md (the original plan, kept outside the repo)
 is the original plan and is wrong in places (below).
 
 ## Run, test, deploy
 
-- Desktop is Windows, Python 3.10. Always `C:/Users/Itsre/Desktop/Inkframe/.venv/Scripts/python`
+- Desktop is Windows, Python 3.10. Always the venv's interpreter, `.venv/Scripts/python` from the repo root
   (`python3` is a broken Store stub; plain `python` may not be the venv). Shell is Git Bash.
 - Run: `python -m inkframe` -> http://localhost:8080/ with the mock display (writes
   `data/last_frame.png` and `.bin`). Tests: `python -m pytest -q` (1000+ tests, ~90 s;
@@ -26,7 +26,7 @@ is the original plan and is wrong in places (below).
 ## Pi facts
 
 - `ssh inkframe` (alias: user `inkframe`, key auth, `HostName inkframe.local`). mDNS is flaky: if
-  it fails to resolve use `-o HostName=<ip> -o HostKeyAlias=inkframe.local` (IP was 10.0.1.238, DHCP).
+  it fails to resolve use `-o HostName=<ip> -o HostKeyAlias=inkframe.local` (the Pi's DHCP address on the LAN).
   Never ask Adam for a password. Do not touch the Pi or the panel unless the task says so.
 - Raspberry Pi OS Lite 64-bit Trixie, Python 3.13.5, gcc 14, ~415 MB usable RAM (service RSS 80-115 MB).
   Running the whole pytest suite beside the service can OOM and reboot it: stop the service first.
