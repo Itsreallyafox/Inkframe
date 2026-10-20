@@ -48,11 +48,12 @@ can succeed: a clean working tree (unless `-Snapshot` or `-Force`) and a
 reboot.
 
 It copies `install.sh` to `~/install.sh` on the Pi and runs
-`bash ~/install.sh --bootstrap`: apt packages, the `spi`/`gpio` groups, SPI,
-the `/opt/inkframe` directories, the bare repo and hook, the venv and the
-sudoers drop-in. If SPI had to be enabled, bootstrap exits 3, and the script
-reboots the Pi, waits up to 180 s for it to come back (a new boot id), and
-checks `/dev/spidev0.0`.
+`bash ~/install.sh --bootstrap`: apt packages (among them `raspi-utils-core`
+for `pinctrl`, see below), the `spi`/`gpio` groups, SPI, the `/opt/inkframe`
+directories, the bare repo and hook, the venv and the sudoers drop-in. If
+SPI had to be enabled, bootstrap exits 3, and the script reboots the Pi,
+waits up to 180 s for it to come back (a new boot id), and checks
+`/dev/spidev0.0`.
 Then it runs `.\deploy.ps1 -SkipFrame` (plus `-Snapshot` or `-Force` if
 given); that first push installs the systemd unit and starts the service.
 Re-running `bootstrap.ps1` is safe: on a bootstrapped Pi it skips the apt
@@ -132,10 +133,11 @@ push that carries them.
   `requirements.txt`, `install.sh`, `deploy/inkframe.service`, a C source or
   header under `inkframe/render/`, or `scripts/build_dither.sh`. It runs
   `bash install.sh --update --no-apt`: pip install of `requirements.txt`
-  (with a loud warning if pip built anything from source, which is a bug:
-  pin a version with an aarch64 wheel; a pure-Python sdist would also show up
-  there and is harmless, but the current pins, feedparser's
-  `feedparser-sgmllib` included, all install from wheels). pip may also print
+  with `--only-binary=:all:`, so a pin (or a dependency of one) without a
+  wheel fails the install at once instead of compiling on the Pi; pin a
+  version with a Python 3.13 aarch64 wheel. Every current pin, feedparser's
+  `feedparser-sgmllib` included, installs from wheels. A loud warning if pip
+  built anything from source anyway stays as a second check. pip may also print
   `ERROR: pip's dependency resolver does not currently take into account all
   the packages that are installed`, about apt packages the venv sees through
   `--system-site-packages` (on Trixie: `types-seaborn` from `python3-typeshed`
@@ -170,13 +172,32 @@ The service cannot use sudo (`NoNewPrivileges=true`). An app-level restart
 (`POST /api/system/restart`) has to exit the process and let
 `Restart=always` start it again.
 
-## Switching to the real panel (Phase 7)
+## The real panel and the mock
 
-The unit ships with `Environment=INKFRAME_DISPLAY=mock`, so nothing touches
-the panel. To use the panel, change that line in `deploy/inkframe.service` to
-`Environment=INKFRAME_DISPLAY=epd`, commit, and run `.\deploy.ps1`. A changed
-unit file triggers the full update, which installs the new unit, reloads
-systemd and restarts the service. To switch back, revert the line the same way.
+The unit ships with `Environment=INKFRAME_DISPLAY=epd` (since commit
+`1628e1a`), so the service drives the panel. Phase 7 brought it up on
+2026-10-19: the six colours and the orientation were confirmed with the
+palette test card. On this frame the default orientation hung upside down,
+so its `settings.json` has `display.rotation` 270 (the code default stays
+90).
+
+To run the service on the Pi without touching the panel, change that line in
+`deploy/inkframe.service` to `Environment=INKFRAME_DISPLAY=mock`, commit, and
+run `.\deploy.ps1`. A changed unit file triggers the full update, which
+installs the new unit, reloads systemd and restarts the service. The mock
+writes `last_frame.png` and `last_frame.bin` in the data directory as on the
+desktop. Switch back to `epd` the same way.
+
+The unit also runs `/usr/bin/pinctrl set 17,18,25 op dl` before the service
+starts (`ExecStartPre`) and after every stop (`ExecStopPost`), whichever
+display it uses. That drives RST, PWR and DC low, so the HAT's 5 V rail is
+not left on after a SIGKILL or an OOM kill mid-refresh, and the service
+starts from the same safe state. `pinctrl` comes from the apt package
+`raspi-utils-core`, which `install.sh` installs (bootstrap or a full install;
+the hook's `--update --no-apt` runs no apt). Both lines start with `-`, so a
+missing `pinctrl` is ignored silently: after a fresh flash check
+`ssh inkframe "ls -l /usr/bin/pinctrl"`. On this frame it is present and
+works for the service user (the `gpio` group, through `/dev/gpiomem`).
 
 ## Recovery
 

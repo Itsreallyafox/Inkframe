@@ -32,6 +32,7 @@ from PIL import Image
 from inkframe.paths import DataPaths
 from inkframe.render import masters
 from tests.conftest import encode, jpeg_bytes
+from tests.test_masters import _jpeg_with_mpf, _mpf_index, _strip_tiff
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -269,6 +270,11 @@ def _heic() -> bytes:
     return heic_bytes(_textured(4032, 3024), quality=80)
 
 
+def _row_strip_tiff() -> bytes:
+    # 100 000 one-row strips (the limit): ~320 bytes of Pillow objects each
+    return encode(_textured(24, masters.MAX_TIFF_STRIPS).convert("L"), "TIFF", tiffinfo={278: 1})
+
+
 ESTIMATED: dict[str, Callable[[], bytes]] = {
     "rgba-png-8mp": lambda: encode(_textured(3000, 2600).convert("RGBA"), "PNG", compress_level=1),
     "palette-png-12mp-trns": _palette_png,
@@ -281,6 +287,7 @@ ESTIMATED: dict[str, Callable[[], bytes]] = {
     ),
     "baseline-jpeg-24mp": lambda: jpeg_bytes(_textured(5712, 4284), quality=85),
     "deflate-tiff-12mp-turned": _turned_tiff,
+    "raw-tiff-100k-row-strips": _row_strip_tiff,
     "heic-12mp": _heic,
 }
 
@@ -307,6 +314,18 @@ def test_decode_cost_is_an_upper_bound(tmp_path: Path, case: str) -> None:
 #   PNG  [120 KB]  +362 MB (accepted!) -> +0.3 MB (422, before Image.open)
 #   WEBP [120 KB]  +364 MB (accepted!) -> +0.2 MB (422, before Image.open)
 #   TIFF [120 KB]  +364 MB (OOM on Pi) -> +0.2 MB (422, before Image.open)
+#
+# A JPEG's MPF segment holds a TIFF-structured MP index that Pillow's
+# ``_getmp`` parses inside ``Image.open`` for every JPEG, unpacking every
+# value into a Python object (``dict(ifd)``), so it is walked too, its values
+# charged as objects:
+#
+#   MPF, 5450 overlapping tags [66 KB]   +356 MB (accepted!) -> 422, before Image.open
+#   MPF, 250 tags of 16 000 LONGs [66 KB] +161 MB (16 MB as raw bytes: accepted!) -> 422
+#
+# and a TIFF's strips: Pillow builds ~320 bytes of objects per strip at
+# ``Image.open``, so a TIFF of 3 million one-row strips (24 MB) peaked at
+# +914 MB; more than ``MAX_TIFF_STRIPS`` is refused before ``Image.open``.
 
 
 def _overlapping_ifd(n_tags: int, size: int) -> bytes:
@@ -354,6 +373,8 @@ IFD_BOMBS: dict[str, Callable[[], bytes]] = {
     "png": lambda: _png_with_exif(_overlapping_ifd(3000, 120_000)),
     "webp": lambda: _webp_with_exif(_overlapping_ifd(3000, 120_000)),
     "tiff": lambda: _overlapping_ifd(3000, 120_000),
+    "mpf": lambda: _jpeg_with_mpf(_mpf_index(5450, 7, 65_000)),
+    "mpf-longs": lambda: _jpeg_with_mpf(_mpf_index(250, 4, 16_000)),
 }
 
 
@@ -378,3 +399,30 @@ def test_exif_tag_expansion_stays_within_budget(tmp_path: Path, fmt: str) -> Non
         f"{fmt}: ingest peaked at {peak / 1e6:.0f} MB on a {len(data) / 1e3:.0f} KB file"
         f" with a {budget / 1e6:.0f} MB budget"
     )
+
+
+def test_tiff_strip_flood_stays_within_budget(tmp_path: Path) -> None:
+    """A 6 MB TIFF of 3 million one-row strips (one shared row, one shared
+    offsets/counts array) is a real TIFF Pillow would open and decode, at
+    ~320 bytes of objects per strip (~1 GB). It must be refused from its
+    strip count before ``Image.open``, so the peak stays tiny."""
+    data = _strip_tiff(3_000_000)
+    budget = 20_000_000
+    paths = DataPaths(tmp_path / "d").ensure_dirs()
+    status: object = "ok"
+    tracemalloc.start()
+    try:
+        masters.ingest(data, "strips.tif", paths=paths, max_decode_bytes=budget)
+    except masters.IngestError as exc:
+        status = exc.status
+    finally:
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+    assert status == 422
+    assert peak < budget * 2, (
+        f"ingest peaked at {peak / 1e6:.0f} MB on a {len(data) / 1e6:.0f} MB file"
+        f" with a {budget / 1e6:.0f} MB budget"
+    )
+    # and in a fresh interpreter, by the process's own peak
+    status, peak, _ = _measure(tmp_path, data, budget)
+    assert status == 422 and peak < budget * 2

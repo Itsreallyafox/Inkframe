@@ -25,13 +25,38 @@ On shutdown the scheduler is stopped first (a refresh in flight finishes and
 puts the panel to sleep), then the display is closed (``close()`` is
 ``sleep()`` plus releasing the GPIO lines), unless a refresh is somehow still
 running after the stop timeout, the executor stopped and the database closed.
-There is no auth: Inkframe is LAN-only by design.
+
+There is no auth: Inkframe is LAN-only by design.  ``_RequestGuardMiddleware``
+keeps other web pages out instead.  A request that may change something (any
+method but GET, HEAD and OPTIONS) is refused with ``403 {"error"}`` unless
+
+* its ``Host`` names the frame: ``localhost``, ``inkframe``, a ``*.local``
+  name, a private, loopback or link-local IP literal, the machine's own
+  hostname, or a name in ``INKFRAME_ALLOWED_HOSTS`` (comma-separated, read
+  once by ``create_app``).  This defeats DNS rebinding, where a page on an
+  attacker's name is re-pointed at the frame's address; and
+* its ``Origin``, when it has one (browsers send it on every cross-site POST),
+  names that same host, and it is not marked ``Sec-Fetch-Site: cross-site``.
+  This defeats a page the owner visits posting a form or a ``fetch`` to the
+  frame (restart, pause, uploads).
+
+The test-client exemption: Starlette's ``TestClient`` (``Host: testserver``
+with ``scope["client"]`` ``("testclient", ...)``, which no real network peer
+can have) counts as local, so tests need no Host header.
+
+Request bodies are capped at ``MAX_BODY_BYTES`` (1 MiB) on every route but
+the photo upload (``POST /api/photos``, which streams against its own 25 MiB
+limit): a larger ``Content-Length`` is answered ``413 {"error"}`` before any
+of the body is read, and a body without one (chunked) is counted as it
+arrives and cut off with the same 413 once it passes the cap.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
+import socket
 import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -39,11 +64,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from os import PathLike, stat_result
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -74,6 +101,16 @@ SCHEDULER_ENV_VAR = "INKFRAME_SCHEDULER"
 #: about 40 s with clear_before_refresh, longer on a cold panel); the systemd
 #: unit's TimeoutStopSec (150 s) must stay well above it
 SCHEDULER_STOP_TIMEOUT = 100.0
+#: extra hostnames (comma-separated) the cross-site check accepts in ``Host``
+ALLOWED_HOSTS_ENV_VAR = "INKFRAME_ALLOWED_HOSTS"
+#: the largest request body accepted on every route but the photo upload
+MAX_BODY_BYTES = 1024 * 1024
+#: requests that are never checked for Host and Origin (they change nothing)
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: the multipart upload, which enforces its own, larger limit while streaming
+_UPLOAD_ROUTES = frozenset({("POST", "/api/photos"), ("POST", "/api/photos/")})
+#: names the frame always answers to, besides ``*.local`` and private IPs
+_FRAME_NAMES = frozenset({"localhost", "inkframe"})
 _NO_CACHE = "no-cache"
 _LONG_CACHE = "public, max-age=31536000"
 
@@ -82,6 +119,73 @@ def scheduler_enabled_by_env() -> bool:
     """False when ``INKFRAME_SCHEDULER`` is ``off`` (or 0/false/no)."""
     value = os.environ.get(SCHEDULER_ENV_VAR, "on").strip().lower()
     return value not in ("off", "0", "false", "no")
+
+
+def allowed_hosts_from_env() -> frozenset[str]:
+    """The extra names ``Host`` may carry: the machine's own hostname plus
+    every entry of ``INKFRAME_ALLOWED_HOSTS`` (``name``, ``name:port`` or an
+    IP literal; case-insensitive), canonicalised like a ``Host`` header."""
+    names: set[str] = set()
+    for raw in [socket.gethostname(), *os.environ.get(ALLOWED_HOSTS_ENV_VAR, "").split(",")]:
+        entry = raw.strip()
+        try:  # a bare IPv6 literal has colons but no brackets
+            name: str | None = str(ipaddress.ip_address(entry.strip("[]")))
+        except ValueError:
+            name = _host_name(entry)
+        if name:
+            names.add(name)
+    return frozenset(names)
+
+
+def host_is_local(name: str, extra: frozenset[str] = frozenset()) -> bool:
+    """Whether a canonical hostname (see ``_host_name``) names the frame on
+    the LAN: ``localhost``, ``inkframe``, ``*.local``, a private, loopback or
+    link-local IP literal, or one of ``extra`` (``allowed_hosts_from_env()``)."""
+    if name in _FRAME_NAMES or name in extra or name.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _canonical_host(name: str) -> str | None:
+    """``name`` lower-cased without a trailing dot, an IP literal in its
+    canonical form; None when nothing is left."""
+    name = name.rstrip(".").lower()
+    try:
+        return str(ipaddress.ip_address(name))
+    except ValueError:
+        return name or None
+
+
+def _host_name(value: str) -> str | None:
+    """The canonical hostname of a ``Host`` header value (``name``,
+    ``name:port``, ``[v6]:port``); None when it is empty or malformed."""
+    value = value.strip()
+    if not value or any(c in value for c in "/?#@\\ \t"):
+        return None
+    try:
+        parts = urlsplit("//" + value)
+        _ = parts.port  # raises ValueError for a malformed port
+    except ValueError:
+        return None
+    return _canonical_host(parts.hostname) if parts.hostname else None
+
+
+def _origin_host(origin: str) -> str | None:
+    """The canonical hostname of an ``Origin`` header; None for ``null`` and
+    anything else that is not an http(s) origin."""
+    try:
+        parts = urlsplit(origin.strip())
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return None
+    return _canonical_host(parts.hostname)
 
 
 def load_available_apps() -> dict[str, App]:
@@ -190,6 +294,8 @@ def create_app(
             db.close()
 
     app = FastAPI(title="Inkframe", version=__version__, lifespan=lifespan)
+    # added first, so it runs inside the catch-all: a bug in it is a logged 500
+    app.add_middleware(_RequestGuardMiddleware, allowed_hosts=allowed_hosts_from_env())
     app.add_middleware(_CatchAllMiddleware)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
@@ -275,6 +381,126 @@ class _CatchAllMiddleware:
                 raise
             body = {"error": str(exc) or type(exc).__name__}
             await JSONResponse(body, status_code=500)(scope, receive, send)
+
+
+def _too_large_message(limit: int) -> str:
+    return f"request body too large (limit {limit / (1024 * 1024):g} MB)"
+
+
+class _BodyTooLarge(StarletteHTTPException):
+    """Raised from ``receive`` once a body without ``Content-Length`` passes
+    the cap.  FastAPI re-raises an ``HTTPException`` from its body read, so
+    the route answers it as a 413 through ``_http_error``."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(status_code=413, detail=_too_large_message(limit))
+
+
+def _from_test_client(scope: Scope) -> bool:
+    """Starlette's ``TestClient`` calls the app in-process as the client
+    ``("testclient", 50000)``; a real peer's address is always an IP."""
+    client = scope.get("client")
+    return bool(client) and client[0] == "testclient"
+
+
+class _RequestGuardMiddleware:
+    """Refuses cross-site requests and over-large bodies before any route
+    runs (the rules are in the module docstring).  A pure ASGI middleware,
+    so the body of a refused request is never read."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_hosts: frozenset[str] = frozenset(),
+        max_body: int = MAX_BODY_BYTES,
+    ) -> None:
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+        self.max_body = max_body
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        method = scope["method"]
+        if method not in _SAFE_METHODS:
+            refusal = self._cross_site_refusal(scope, headers)
+            if refusal is not None:
+                log.warning(
+                    "refused %s %s: %s (Host %r, Origin %r)",
+                    method,
+                    scope.get("path"),
+                    refusal,
+                    headers.get("host", "")[:100],
+                    headers.get("origin", "")[:100],
+                )
+                await _error(403, f"request refused: {refusal}")(scope, receive, send)
+                return
+        if (method, scope.get("path")) in _UPLOAD_ROUTES:
+            await self.app(scope, receive, send)
+            return
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                size = int(declared)
+            except ValueError:
+                await _error(400, "invalid Content-Length")(scope, receive, send)
+                return
+            if size > self.max_body:
+                await _error(413, _too_large_message(self.max_body))(scope, receive, send)
+                return
+        await self._call_capped(scope, receive, send)
+
+    def _cross_site_refusal(self, scope: Scope, headers: Headers) -> str | None:
+        """Why a state-changing request is refused, or None to let it in."""
+        host = _host_name(headers.get("host", ""))
+        if host is None or not (
+            host_is_local(host, self.allowed_hosts)
+            or (host == "testserver" and _from_test_client(scope))
+        ):
+            return "unexpected Host"
+        origin = headers.get("origin")
+        if origin is not None and _origin_host(origin) != host:
+            return "cross-site origin"
+        if headers.get("sec-fetch-site", "").strip().lower() == "cross-site":
+            return "cross-site origin"
+        return None
+
+    async def _call_capped(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run the app with a ``receive`` that counts the body and raises
+        ``_BodyTooLarge`` once it passes ``max_body`` (a chunked body: one
+        with a ``Content-Length`` cannot, the server stops it there)."""
+        received = 0
+        response_started = False
+
+        async def capped_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body:
+                    raise _BodyTooLarge(self.max_body)
+            return message
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, capped_receive, tracking_send)
+        except _BodyTooLarge as exc:
+            # only when nothing inside answered it (a route's body read does)
+            if response_started:
+                raise
+            await _error(413, str(exc.detail))(scope, receive, send)
+
+
+def _error(status: int, message: str) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status)
 
 
 async def _http_error(request: Request, exc: Exception) -> Response:

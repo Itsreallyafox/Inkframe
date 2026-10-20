@@ -66,7 +66,28 @@ trusted.
      limit, UTF-8 iTXt at up to 4 bytes a character), private PNG chunks,
      and JPEG APP and COM payloads. Pillow already decodes a PNG's text
      before its pixels while it opens it, so that metadata alone must fit
-     the budget before `Image.open` runs.
+     the budget before `Image.open` runs. The JPEG walk follows Pillow's
+     parser exactly, junk bytes included: Pillow steps over junk between
+     markers and goes on parsing, so an EXIF or MPF segment behind a junk
+     byte is still found (the EXIF locator used to stop there, and a
+     1000-tag EXIF bomb behind one junk byte was charged 100 KB while Pillow
+     built 50 MB).
+   - **JPEG scans and tables** (`masters._check_jpeg_scans`, on the raw
+     bytes). libjpeg decodes a JPEG's scans in C, but each scan is another
+     pass over the whole image, so a crafted file of thousands of tiny
+     progressive scans holds the one render thread for minutes (a 5 KB
+     JPEG of 210 scans already decodes 28 times slower than its 10-scan
+     original). From the first SOS up to EOI (an MPO's later images follow
+     it and are never decoded) the walk jumps from marker to marker at C
+     speed, over the entropy-coded data, its stuffed zeros and restart
+     markers, and refuses more than 64 scans: baseline has one (one per
+     component when not interleaved), progressive about 10 (libjpeg's
+     default script) and at most about 15. It also counts the DHT and DQT
+     tables before and between the scans, every table of a segment that
+     holds several, and refuses more than 256: real files have a few, and
+     Pillow parses every DQT table before the first scan in Python (25 MB
+     of them take 0.8 s on the desktop). The markers after the first scan
+     count towards the same 50 000 steps as the header's.
    - **EXIF/TIFF IFD tags** (`masters._ifd_materialised_bytes`, also on the
      raw bytes, before `Image.open`). An embedded IFD whose thousands of tags
      all point at one large byte region makes Pillow allocate
@@ -75,19 +96,46 @@ trusted.
      `getexif()`), for PNG and WEBP in `_orientation` (`getexif`), and for
      TIFF while the file's own IFD is parsed. The header scan above never saw
      it, because it only sized the raw APP1 segment or eXIf/EXIF chunk. The
-     walker finds the EXIF block (every APP1 `Exif\0\0` for JPEG, the eXIf
-     chunk for PNG, the EXIF chunk for WEBP, the file itself for TIFF), parses
-     the TIFF header (byte order, first IFD offset; classic and BigTIFF), and
-     walks IFD0 → the next-IFD chain and the Exif (0x8769), GPS (0x8825) and
-     Interop (0xA005) sub-IFDs, with a visited set. It sums `count x
-     type_size` (TIFF 6 / EXIF types 1–13; an unknown type counts as one
-     byte) over every entry — what `getexif()` materialises, one object per
-     tag value, and keeps alive on `im._exif` — and charges it as retained
-     bytes, so the same budget check that runs before `Image.open` refuses it
-     (422). A single IFD of more than 2000 entries, or a walk that would touch
-     more than 32 IFDs, is refused outright; no legitimate file comes near
-     either, and both are reached long before the memory would be. A malformed
-     offset (out of range) stops that branch of the walk and is not an error.
+     walker (`masters._walk_ifds`) finds the EXIF block (every APP1
+     `Exif\0\0` for JPEG, the eXIf chunk for PNG, the EXIF chunk for WEBP, the
+     file itself for TIFF), parses the TIFF header (byte order, first IFD
+     offset; classic and BigTIFF), and walks IFD0 → the next-IFD chain and the
+     Exif (0x8769), GPS (0x8825) and Interop (0xA005) sub-IFDs, with a visited
+     set. It sums `count x type_size` (TIFF 6 / EXIF types 1–13; an unknown
+     type counts as one byte) over every entry — the raw tag data
+     `getexif()` reads and keeps alive on `im._exif` — and charges it as
+     retained bytes, so the same budget check that runs before `Image.open`
+     refuses it (422). A TIFF's own IFDs are charged twice: Pillow reads IFD0
+     into `tag_v2` at `Image.open` and again for `getexif()` while it loads
+     the pixels, and keeps both (8 MB of tags held 16 MB). A single IFD of
+     more than 2000 entries, or a walk that would touch more than 32 IFDs, is
+     refused outright; no legitimate file comes near either, and both are
+     reached long before the memory would be. A malformed offset (out of
+     range) stops that branch of the walk and is not an error.
+   - **The MP index** of a JPEG's APP2 `MPF\0` segment (what makes a JPEG
+     an MPO: phone photos with a preview or gain map) is a TIFF-structured
+     IFD too, and Pillow's JPEG plugin parses it inside `Image.open` for
+     every JPEG (`_getmp`, which decides whether the file is an MPO). The
+     walker walks the block after every `MPF\0` signature, and charges each
+     value as the Python object `_getmp` makes of it: unlike `getexif()`,
+     which keeps a tag's raw bytes until it is read, `_getmp` unpacks the
+     whole index at once (`dict(ifd)`), 38 to 44 bytes per SHORT, LONG,
+     FLOAT or DOUBLE (a tuple slot and an int or float), about 245 per
+     RATIONAL (an `IFDRational` and its `Fraction`) and about 2.4 per BYTE
+     or ASCII value (copied as bytes or str), plus about 440 bytes an entry
+     and 680 per image of the MP Entry list (all measured; charged at 48,
+     256, 3, 512 and 768). A 66 KB JPEG whose MP index had 5450 tags all
+     reading one 65 KB region peaked at 356 MB (now refused for its tag
+     count), and one of 250 tags of 16 000 LONGs, 16 MB as raw bytes, built
+     161 MB of ints (now charged 192 MB).
+   - **TIFF strips**: Pillow's TIFF plugin builds a tile, its extents and
+     the offset and byte count as ints for every strip or tile at
+     `Image.open`, about 320 bytes each (measured 316 to 324), and a 24 MB
+     TIFF of 3 million one-row strips peaked at 914 MB. The walker notes
+     the largest count of StripOffsets, StripByteCounts, TileOffsets or
+     TileByteCounts in any IFD, charges 320 bytes per strip as retained, and
+     refuses more than 100 000 strips or tiles outright (a 60 MP photo stored
+     a row a strip has under 10 000).
    - **Pixels**: `Image.open` parses the headers only, and anything over
      60 MP is refused straight after it. `Image.MAX_IMAGE_PIXELS` is not
      changed: it is process-wide, so another thread opening an image during
@@ -199,8 +247,11 @@ copy (tested).
 
 The adjusted box is dithered with the recipe's method, `serpentine`,
 `strength` and `distance`. The palette is the **measured** panel colours from
-settings when `recipe.palette == "measured"`, otherwise the nominal
-primaries. The bars are set to palette white (index 1) exactly.
+settings when `recipe.palette == "measured"` and the global switch
+`settings.palette.use_measured` is on; otherwise the nominal primaries (with
+the switch off every photo dithers against the nominal primaries whatever its
+recipe says; the cached PNG is still coloured with the measured palette). The
+bars are set to palette white (index 1) exactly.
 
 Dithering only the box is deliberate:
 
@@ -390,10 +441,13 @@ The photo object is `Photo.to_dict()` without `master_path`, plus
 | uploads holding bytes at once | 2 | `api.photos.UPLOAD_SLOTS` |
 | image size | 60 MP | `masters.MAX_PIXELS` |
 | RLE-compressed BMP | 4 MP | `masters.MAX_RLE_BMP_PIXELS` |
-| header parsing steps (JPEG markers and padding, PNG chunks, GIF blocks) | 50 000 | `masters.MAX_HEADER_STEPS` |
+| header parsing steps (JPEG markers, padding and junk bytes, PNG chunks, GIF blocks) | 50 000 | `masters.MAX_HEADER_STEPS` |
 | GIF comment joining | 256 MB copied (about a 360 KB comment) | `masters.MAX_GIF_COMMENT_COPY` |
-| EXIF/TIFF tag entries per IFD | 2000 | `masters._MAX_IFD_ENTRIES` |
-| EXIF/TIFF IFDs walked | 32 | `masters._MAX_IFDS` |
+| JPEG scans (up to the first EOI) | 64 | `masters.MAX_JPEG_SCANS` |
+| JPEG Huffman and quantisation tables (DHT, DQT; every table of a segment) | 256 | `masters.MAX_JPEG_TABLES` |
+| EXIF/TIFF/MPF tag entries per IFD | 2000 | `masters._MAX_IFD_ENTRIES` |
+| EXIF/TIFF/MPF IFDs walked | 32 | `masters._MAX_IFDS` |
+| TIFF strips or tiles per IFD | 100 000 | `masters.MAX_TIFF_STRIPS` |
 | upload body: no data / in all | 30 s / 300 s, then 408 | `api.photos.UPLOAD_IDLE_SECONDS`, `UPLOAD_READ_SECONDS` |
 | ingest memory: estimate plus the upload's bytes | 150 MB | `masters.MAX_DECODE_BYTES` |
 | master | long edge 1800 px, JPEG q92 | `masters.MASTER_LONG_EDGE` |
@@ -423,7 +477,8 @@ copy, libheif's YCbCr planes, and the copies Pillow makes while it reads a
 PNG text chunk), the strip-wise normalise (decoded image plus the reduced
 copy), the resize (reduced image, Lanczos's intermediate, master) and the
 tail (transpose, sRGB, JPEG encoder). What the header parser keeps
-(`scan_metadata`: PNG text, JPEG APP segments) is added to every stage,
+(`scan_metadata`: PNG text, JPEG APP segments, the tag data and objects
+of EXIF, TIFF and MPF IFDs, a TIFF's strips) is added to every stage,
 since every image derived from the opened one shares it through its copied
 `info` until the master is encoded. The total is scaled by 1.1 and 6 MB is
 added. `tests/test_masters_memory.py` measures real peaks in a fresh
@@ -457,6 +512,7 @@ estimate including the file's bytes, and what the default budget does.
 | 24 MP deflate TIFF | +110 MB | 126 MB | accepted |
 | 24 MP deflate TIFF with an orientation tag | +196 MB | 220 MB | refused |
 | 48 MP deflate TIFF | +208 MB | 235 MB | refused |
+| 2.4 MP grey TIFF in 100 000 one-row strips (the limit; 3 million peaked at +914 MB) | +41 MB | 49 MB | accepted |
 | 12 MP HEIC (4032 x 3024) | +77 MB | 85 MB | accepted |
 | 24 MP HEIC (5712 x 4284), strip path | +120 MB (+181 MB through the Pillow plugin) | 147 MB | accepted |
 | 36 MP HEIC | +179 MB | 208 MB | refused |
@@ -488,14 +544,21 @@ Not counted in the estimate:
   that upload is being read, its spooled copy and its bytes coexist for a
   moment, since Trixie's `/tmp` is a tmpfs: 2 x 25 MB at the very worst;
 - the process baseline;
-- a TIFF's or EXIF's **inline** tag data (a large XMP or ICC tag whose bytes
-  live once in the file): Pillow keeps one copy while the opened image lives,
-  a few KB in real files. What is *not* ignored is the IFD's **materialised**
-  size — one object per tag value, `count x type_size` summed over the whole
-  walked IFD tree (`masters._ifd_materialised_bytes`). It is not bounded by
-  the file: thousands of tags that all point at the same region expand to
-  `tag_count x region` bytes from a ~100 KB file, so it is charged as retained
-  bytes (see [Ingest](#stages) step 3) and refused before `Image.open`.
+- the bookkeeping of each EXIF or TIFF tag entry Pillow reads (its dict
+  slots and tag lookup, about 350 bytes; at most 2000 an IFD), left to the
+  1.1 margin. Everything else Pillow builds from a tag directory is counted
+  (see [Ingest](#stages) step 3), because none of it is bounded by the file:
+  thousands of tags that all point at the same region expand to
+  `tag_count x region` bytes from a ~100 KB file. That is every tag's
+  `count x type_size` summed over the whole walked IFD tree
+  (`masters._walk_ifds`), twice for a TIFF's own IFDs, each value of a JPEG's
+  MP index as the Python object it becomes, and 320 bytes per TIFF strip or
+  tile, all charged as retained bytes and refused before `Image.open`;
+- CPU time, as such. What bounds it is the step, scan, table and strip
+  limits above and, for an MP index, the memory budget: the most RATIONAL
+  values the default budget lets into one (about 500 000) take about 2 s to
+  unpack on the desktop, and a TIFF of 100 000 one-row strips about 1 s to
+  open and load.
 
 The upload's bytes are counted once, also for compressed TIFFs: libtiff's
 in-memory path decodes from `BytesIO.getvalue()`, and a `BytesIO` made from

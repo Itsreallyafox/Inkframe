@@ -11,6 +11,10 @@ from PIL import Image, ImageFont
 
 from inkframe.apps import APP_IDS, load_app
 from inkframe.apps.base import (
+    MAX_LIST_ITEM_CHARS,
+    MAX_LIST_ITEMS,
+    MAX_TEXT_CHARS,
+    MAX_TEXTAREA_CHARS,
     App,
     Field,
     FontLibrary,
@@ -83,6 +87,50 @@ def test_validate_settings_merges_defaults_and_rejects_unknown() -> None:
         validate_settings(schema, {"colour": "red"})
     d = schema[1].to_dict()
     assert d["min"] == 1 and d["type"] == "number"
+
+
+def test_field_caps() -> None:
+    assert (MAX_TEXT_CHARS, MAX_TEXTAREA_CHARS) == (500, 20_000)
+    assert (MAX_LIST_ITEMS, MAX_LIST_ITEM_CHARS) == (100, 2000)
+    t = Field("location", "Location", "text", "")
+    assert coerce_field(t, "x" * 500) == "x" * 500
+    assert coerce_field(t, "  " + "x" * 500 + "  ") == "x" * 500  # counted after stripping
+    with pytest.raises(ValueError, match="location: at most 500 characters, got 501"):
+        coerce_field(t, "x" * 501)
+    with pytest.raises(ValueError, match="location: at most 500 characters"):
+        coerce_field(t, "x" * 5_000_000)
+    ta = Field("note", "Note", "textarea", "")
+    assert len(coerce_field(ta, "x\n" * 10_000)) == 20_000
+    with pytest.raises(ValueError, match="note: at most 20000 characters, got 20001"):
+        coerce_field(ta, "x" * 20_001)
+    lst = Field("feeds", "Feeds", "list", [])
+    urls = [f"https://example.org/{i}.xml" for i in range(100)]
+    assert coerce_field(lst, urls) == urls
+    # blank entries do not count, as a pasted list ends with a newline or two
+    assert coerce_field(lst, "\n\n".join(urls) + "\n\n") == urls
+    with pytest.raises(ValueError, match="^feeds: at most 100 entries$"):
+        coerce_field(lst, [*urls, "https://example.org/101.xml"])
+    with pytest.raises(ValueError, match="^feeds: at most 100 entries$"):
+        coerce_field(lst, "\n".join(f"https://example.org/{i}" for i in range(20_000)))
+    assert coerce_field(lst, ["a", "x" * 2000]) == ["a", "x" * 2000]
+    with pytest.raises(ValueError, match="feeds: entry 2 is 2001 characters long; at most 2000"):
+        coerce_field(lst, ["a", "", "x" * 2001])
+    # the caps also hold through validate_settings, and the UI is told them
+    with pytest.raises(ValueError, match="feeds: at most 100 entries"):
+        validate_settings((lst,), {"feeds": urls * 2})
+    assert t.to_dict()["maxlength"] == 500 and ta.to_dict()["maxlength"] == 20_000
+    d = lst.to_dict()
+    assert d["max_items"] == 100 and d["maxlength"] == 2000
+    assert "maxlength" not in Field("on", "On", "bool", True).to_dict()
+
+
+def test_apps_share_one_user_agent() -> None:
+    from inkframe import USER_AGENT, __version__
+    from inkframe.apps import headlines_data, quotes, weather
+
+    assert USER_AGENT == f"Inkframe/{__version__} (e-ink photo frame)"
+    assert "github" not in USER_AGENT.lower()
+    assert weather.USER_AGENT is headlines_data.USER_AGENT is quotes.USER_AGENT is USER_AGENT
 
 
 # --- canvas -----------------------------------------------------------------------

@@ -177,8 +177,14 @@ def effective_recipe(photo: Photo, settings: Settings) -> dict[str, Any]:
 
 def resolve_render_palette(recipe: Mapping[str, Any], settings: Settings) -> Palette:
     """The palette a recipe dithers against: the measured panel colours from
-    settings for ``"measured"``, the nominal primaries otherwise."""
-    return settings.measured_palette() if recipe["palette"] == "measured" else NOMINAL
+    settings for ``"measured"`` while ``settings.palette.use_measured`` is on,
+    the nominal primaries otherwise.  ``use_measured`` is the global switch
+    (Settings: "Off: dither against the nominal primaries instead"), so
+    turning it off makes every photo dither against nominal whatever its
+    recipe says; the PNGs are still coloured with the measured palette."""
+    if recipe["palette"] == "measured" and settings.palette.use_measured:
+        return settings.measured_palette()
+    return NOMINAL
 
 
 def recipe_key(

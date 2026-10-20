@@ -468,6 +468,7 @@ def _recipe_job(
 async def put_recipe(
     photo_id: str,
     body: Annotated[dict[str, Any], Body()],
+    request: Request,
     db: DbDep,
     store: SettingsDep,
     paths: PathsDep,
@@ -477,7 +478,12 @@ async def put_recipe(
     its effective recipe (422 naming the field on error), then render it.
     ``{"reset": true}`` drops the override so the photo follows the default;
     a body without recipe fields (``{}``, ``{"reset": false}``) changes
-    nothing."""
+    nothing.
+
+    Once the recipe is stored (or reset) the scheduler is told the photo
+    would render differently (``Scheduler.invalidate(photo_id)``): if it is
+    on the panel, the next rotation change repaints it instead of skipping
+    it as "already showing".  Nothing is refreshed early."""
     _require_id(photo_id)
     patch: dict[str, Any] | None = dict(body)
     if "reset" in patch:
@@ -492,7 +498,13 @@ async def put_recipe(
                     status_code=422, detail="reset cannot be combined with recipe fields"
                 )
             patch = None
-    return await _run(executor, _recipe_job, photo_id, patch, db, store, paths)
+    result = await _run(executor, _recipe_job, photo_id, patch, db, store, paths)
+    if patch is None or patch:  # something was stored: the override, or its removal
+        scheduler = getattr(request.app.state, "scheduler", None)
+        if scheduler is not None:
+            # off the event loop: it takes the scheduler's lock and writes its state
+            await run_in_threadpool(scheduler.invalidate, photo_id)
+    return result
 
 
 @router.put("/{photo_id}/flags")

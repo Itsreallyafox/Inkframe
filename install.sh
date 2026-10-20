@@ -32,8 +32,10 @@ BASE_URL=http://127.0.0.1:80
 HEALTH_TIMEOUT=30
 JOURNAL_LINES=40
 # libc6-dev is listed explicitly: gcc cannot link libdither.so without it.
+# raspi-utils-core provides /usr/bin/pinctrl, which the unit's ExecStartPre and
+# ExecStopPost use to drive RST, PWR and DC low (deploy/inkframe.service).
 APT_PACKAGES=(git python3-venv python3-pip python3-dev python3-spidev python3-gpiozero
-  python3-lgpio libopenjp2-7 gcc libc6-dev avahi-daemon curl)
+  python3-lgpio libopenjp2-7 gcc libc6-dev avahi-daemon curl raspi-utils-core)
 
 NO_APT=0
 NEED_REBOOT=0
@@ -57,8 +59,8 @@ Modes:
                sudoers drop-in.  Does not install the service (the first push
                does that).
   --update     After a push (run by the post-receive hook): pip install -r
-               requirements.txt, build libdither.so, install/refresh the
-               systemd unit, restart, health check.
+               requirements.txt (wheels only), build libdither.so,
+               install/refresh the systemd unit, restart, health check.
   --health     Wait up to 30 s for GET /api/health, then print /api/status.
   (no mode)    Full install / recovery from a checkout: everything --bootstrap
                does, then everything --update does.
@@ -369,12 +371,17 @@ compiled_packages() {
   sed -nE 's/.*(Building wheel for|Running setup\.py [a-z_]+ for) ([^ ]+).*/\2/p' "$1" | sort -u | paste -sd ' ' -
 }
 
+# --only-binary=:all: makes a missing wheel fail the install at once instead of
+# compiling for minutes (or running out of memory) on the Pi.  Every pin and
+# its dependencies ship wheels for Python 3.13 on aarch64; the "compiled
+# something" check below stays as a second line of defence.
 pip_requirements() {
-  step "pip install -r $APP/requirements.txt"
+  step "pip install --only-binary=:all: -r $APP/requirements.txt"
   local req=$APP/requirements.txt log=$WORK/pip.log built
   [ -f "$req" ] || die "missing $req (is $APP a checkout?)"
-  if ! PIP_DISABLE_PIP_VERSION_CHECK=1 "$VENV/bin/python" -m pip install --prefer-binary -r "$req" 2>&1 | tee "$log"; then
-    die "pip install failed"
+  if ! PIP_DISABLE_PIP_VERSION_CHECK=1 "$VENV/bin/python" -m pip install --only-binary=:all: \
+    -r "$req" 2>&1 | tee "$log"; then
+    die "pip install failed (no wheel for a pin? pin a version with a cp313 aarch64 wheel)"
   fi
   built=$(compiled_packages "$log")
   if [ -n "$built" ]; then

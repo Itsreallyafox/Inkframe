@@ -22,6 +22,11 @@ Environment=INKFRAME_DATA=/opt/inkframe/data
 Environment=INKFRAME_HOST=0.0.0.0
 Environment=INKFRAME_PORT=80
 Environment=PYTHONUNBUFFERED=1
+# Start from the same safe pin state the stop leaves (see ExecStopPost below):
+# RST (17), PWR (18) and DC (25) driven low, so the HAT's 5 V rail is off
+# until the first refresh's init() claims the lines.  "-": a missing or
+# failing pinctrl never stops the service from starting.
+ExecStartPre=-/usr/bin/pinctrl set 17,18,25 op dl
 ExecStart=/opt/inkframe/.venv/bin/python -m inkframe
 Restart=always
 RestartSec=3
@@ -39,7 +44,8 @@ TimeoutStopSec=150
 # (SIGKILL, OOM), a released GPIO line keeps its last level and the HAT's
 # 5 V rail (BCM18 = PWR) could stay on.  Drive RST (17), PWR (18) and DC (25)
 # low as outputs after every stop; harmless after a clean shutdown.
-# pinctrl is in raspi-utils-core and works for the gpio group via /dev/gpiomem.
+# pinctrl is in raspi-utils-core (an install.sh apt package) and works for
+# the gpio group via /dev/gpiomem.
 ExecStopPost=-/usr/bin/pinctrl set 17,18,25 op dl
 
 [Install]

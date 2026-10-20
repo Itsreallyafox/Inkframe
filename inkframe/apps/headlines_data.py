@@ -35,6 +35,7 @@ from typing import Any
 import feedparser
 import httpx
 
+from inkframe import USER_AGENT
 from inkframe.apps.headlines_text import (
     clean_text,
     clean_title,
@@ -46,7 +47,6 @@ from inkframe.apps.headlines_text import (
 
 log = logging.getLogger("inkframe.apps.headlines")
 
-USER_AGENT = "Inkframe/0.1 (+https://github.com/inkframe)"
 ACCEPT = (
     "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 )

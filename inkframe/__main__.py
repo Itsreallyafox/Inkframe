@@ -13,6 +13,9 @@ import uvicorn
 
 from inkframe.log import configure_logging
 
+#: how long uvicorn waits for open requests on SIGTERM before cancelling them
+GRACEFUL_SHUTDOWN_SECONDS = 30
+
 
 def main() -> None:
     """Parse the environment and run uvicorn until SIGINT/SIGTERM."""
@@ -33,6 +36,13 @@ def main() -> None:
         port=port,
         log_config=None,
         access_log=False,
+        # on SIGTERM uvicorn drains open requests before the lifespan shutdown
+        # that stops the scheduler; without a bound a stalled upload (up to
+        # UPLOAD_READ_SECONDS = 300 s) would hold it past the unit's
+        # TimeoutStopSec=150 and get the process SIGKILLed mid-refresh.
+        # Budget: 30 s drain + 100 s scheduler stop (SCHEDULER_STOP_TIMEOUT)
+        # < 150 s.
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
 
 

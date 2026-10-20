@@ -362,7 +362,7 @@ def test_fetch_feed_sends_user_agent_and_checks_status(monkeypatch: pytest.Monke
 
     _mock_httpx(monkeypatch, handler)
     assert data.fetch_feed("https://example.org/rss", 5) == b"<rss/>"
-    assert seen["ua"] == "Inkframe/0.1 (+https://github.com/inkframe)"
+    assert seen["ua"] == data.USER_AGENT
     with pytest.raises(httpx.HTTPStatusError):
         data.fetch_feed("https://example.org/missing", 5)
     monkeypatch.setattr(data, "MAX_BYTES", 3)

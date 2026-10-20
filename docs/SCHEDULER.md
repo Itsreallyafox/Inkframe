@@ -163,8 +163,9 @@ applies those on top.
   item `snapshot()["rotation"]["next"]` announced, and the rotation advances
   as if that item had come up on schedule.
 - If the requested app or photo has an enabled slot in the rotation, the
-  rotation **jumps** there and starts that slot now. A photo shown inside the
-  photos slot that is already running only restarts the photo's dwell. If it
+  rotation **jumps** there and starts that slot now, unless that slot is the
+  one already running: an app then keeps the slot's timing, and a photo shown
+  inside the running photos slot only restarts the photo's dwell. If it
   has no slot, the rotation timing is left alone, and the next rotation change
   comes when it was due anyway (and no earlier than the floor).
 - `fires_at = max(now, last_attempt + show_now_min_seconds)`, with
@@ -375,7 +376,7 @@ All routes are JSON, and errors are `{"error": ...}`. Display routes reply with
 |---|---|
 | `POST /api/display/next` | `show_next()` |
 | `POST /api/display/pause` / `resume` | persist `settings.paused`, wake |
-| `POST /api/display/show` | body `{"app_id"}` or `{"photo_id"}`. Unknown id: 404. Both, neither, extra keys or a non-string: 422 |
+| `POST /api/display/show` | body `{"app_id"}` or `{"photo_id"}`; with `app_id` an optional integer `"variant"` forces one of the app's layouts (the Settings test card is `{"app_id": "patterns", "variant": 2}`). Unknown id: 404. Both, neither, extra keys, a non-string, or a variant that is out of range or given with `photo_id`: 422 |
 | `GET /api/rotation` | `{slots: [{app_id, enabled, duration_minutes, options, name, description}], paused, quiet_hours, apps}`. The photos options are exactly `dwell_minutes` and `order`, as the scheduler reads them (defaults filled in); other keys that `/api/settings` stored are left out, so a GET body can be PUT back |
 | `PUT /api/rotation` | `{"slots": [...], "paused"?}`. Replaces the whole list. App ids must be known; photos options are `dwell_minutes` (whole number, 1–1440) and `order` (`shuffle` or `sequential`). Everything is validated through `Settings.merged`, and `name`/`description` from the GET shape are ignored. Invalid input: 422 and nothing changes. Wakes the scheduler |
 | `GET /api/apps` | `[{id, name, description, needs_dither, variants, settings_schema, settings}]` |
@@ -414,6 +415,11 @@ frame. `next_at` is `null` while paused or when no slot is enabled.
   instead of skipping it as "already showing". With `photo_id`, it only
   marks the panel if that photo is on it (and returns whether it did).
   Nothing is refreshed early; the floor and quiet hours apply as usual.
+  It is wired: `PUT /api/photos/<id>/recipe` calls `invalidate(<id>)` once
+  the override is stored or reset (`{"reset": true}`; a body without recipe
+  fields changes nothing and calls nothing), and `PUT /api/recipe/default`
+  calls `invalidate()` with no id (any photo that follows the default may
+  render differently) and then `wake()`.
 - `current_photo_id()`: the photo the photos slot is showing.
 
 ## Known limitations
@@ -428,7 +434,8 @@ frame. `next_at` is `null` while paused or when no slot is enabled.
   rotation change makes the next restart's keep-alive draw the frame upside
   down.
 - `show_now(photo_id=...)` reads the photo row on the API thread; a row that
-  does not parse makes `POST /api/display/show` a 500 with the error.
+  does not parse makes `POST /api/display/show` a 422 with the decoder's
+  message (only a SQLite error is a 500).
 - `render_to_frame` (`inkframe/apps/base.py`) still returns the dither
   engine's output unchecked. The scheduler validates every frame itself; the
   preview endpoint relies on the engine (Phase 2) returning valid frames.

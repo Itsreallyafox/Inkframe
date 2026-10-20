@@ -64,7 +64,7 @@ NOMINAL_RGB: tuple[RGB, ...] = (
 
 #: Starting guess for what the panel really shows.  Spectra 6 whites are
 #: slightly grey, the blue is dark and desaturated, the yellow warm, the
-#: green dull.  Adam tunes these from the palette test card in Phase 7.
+#: green dull.  The owner tunes these from the palette test card in Phase 7.
 MEASURED_DEFAULT_RGB: tuple[RGB, ...] = (
     (24, 24, 26),
     (226, 226, 220),

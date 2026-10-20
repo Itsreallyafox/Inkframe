@@ -11,7 +11,7 @@ sans (`-apple-system, Inter, Segoe UI, Roboto`) and `ui-monospace`.
 Budget: HTML + CSS + JS stay under 300 KB uncompressed (about 215 KB today;
 `tests/test_static.py` enforces it).
 
-Screenshots of every view at phone and desktop width are in `docs/ui/`.
+Screenshots of the views at phone and desktop width are in `docs/ui/` (the Settings page only at phone width).
 
 ## Files
 
@@ -87,6 +87,16 @@ the message is also shown as a toast; views that show errors inline
 (Rotation's 422s, the Apps forms) pass `quiet: true` and place the message
 under the field it names (`rotation[2].duration_minutes ...` marks that
 slot's input). A network failure flips the connection badge to Offline.
+
+There is no login, so the server keeps other web pages out instead (see the
+`inkframe/app.py` docstring): every request but GET/HEAD/OPTIONS must name
+the frame in `Host` (`localhost`, `inkframe`, `*.local`, a private or
+loopback IP, the Pi's hostname, or a name in `INKFRAME_ALLOWED_HOSTS`) and,
+when the browser sends `Origin`, come from that same host; anything else is
+`403 {"error": "request refused: ..."}`. Opening the UI through another name
+(a reverse proxy, a DNS name) needs that name in `INKFRAME_ALLOWED_HOSTS`.
+Request bodies are capped at 1 MiB (`413`, before the body is read); uploads
+keep their own 25 MB limit.
 
 Toasts: `toast(message, "ok" | "warn" | "error" | "info")`, bottom of the
 screen above the tab bar (bottom right on desktop). Deletes and the restart

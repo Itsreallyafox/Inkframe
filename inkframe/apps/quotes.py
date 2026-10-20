@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 import httpx
 from PIL import Image, ImageFont
 
+from inkframe import USER_AGENT
 from inkframe.apps.base import Field, FontLibrary, RenderContext, schema_defaults
 from inkframe.apps.draw import Canvas
 from inkframe.apps.quotes_data import (
@@ -64,7 +65,6 @@ from inkframe.display.palette import BLACK, BLUE, GREEN, RED, WHITE, YELLOW
 log = logging.getLogger("inkframe.apps.quotes")
 
 ZENQUOTES_URL = "https://zenquotes.io/api/random"
-USER_AGENT = "Inkframe/0.1 (+https://github.com/inkframe)"
 #: required on every card that shows a ZenQuotes quote (their terms of use)
 ZEN_ATTRIBUTION = "Quotes by ZenQuotes.io"
 #: a ZenQuotes quote fetched less than this long ago is reused, not refetched,

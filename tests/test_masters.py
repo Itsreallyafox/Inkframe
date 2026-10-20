@@ -6,6 +6,7 @@ import io
 import struct
 import time
 import tracemalloc
+import warnings
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
@@ -1098,3 +1099,295 @@ def test_jpeg_with_a_large_legitimate_icc_segment_still_ingests(paths: DataPaths
     assert masters._jpeg_exif_block(data) == b""  # ICC is APP2, not APP1 Exif
     m = ingest(data, "wide-gamut.jpg", paths=paths)
     assert (m.width, m.height) == (64, 64)
+
+
+def test_exif_behind_a_junk_byte_is_still_charged(paths: DataPaths) -> None:
+    # Pillow steps over junk between markers and goes on parsing, so an EXIF
+    # block behind one junk byte still reaches getexif(); the EXIF locator
+    # used to stop at the junk (a 1000-tag IFD bomb was charged 100 KB, and
+    # Pillow materialised 50 MB of it)
+    jpeg = jpeg_bytes(Image.new("RGB", (16, 16), (200, 10, 10)))
+    first = 4 + int.from_bytes(jpeg[4:6], "big")  # after the APP0 segment
+    payload = b"Exif\x00\x00" + _ifd([(40000 + i, 7, 50_000, 8) for i in range(1000)])
+    app1 = b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
+    data = jpeg[:first] + b"\x00" + app1 + jpeg[first:]
+    assert masters._jpeg_exif_block(data) == payload
+    assert masters.scan_metadata(data, "jpeg").retained >= 1000 * 50_000
+    with pytest.raises(UndecodableImage, match="metadata"):
+        ingest(data, "junk.jpg", paths=paths, max_decode_bytes=20_000_000)
+
+
+def _spy_open(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record every ``Image.open`` (its ``formats``) from now on."""
+    opened: list[object] = []
+    real_open = Image.open
+
+    def spy(*args: Any, **kw: Any) -> Image.Image:
+        opened.append(kw.get("formats"))
+        return real_open(*args, **kw)
+
+    monkeypatch.setattr(Image, "open", spy)
+    return opened
+
+
+# --- TIFF strips ------------------------------------------------------------------------
+
+
+def _strip_tiff(rows: int) -> bytes:
+    """An 8 x ``rows`` grey uncompressed TIFF stored one row a strip that
+    stays small however many rows it has (``rows`` > 2): every strip is the
+    same 8-byte row at offset 8, and one array of SHORT 8s is both its
+    StripOffsets and its StripByteCounts.  Pillow opens and decodes it,
+    building ~320 bytes of Python objects per strip."""
+    entries = [
+        (256, 3, 1, 8),  # ImageWidth
+        (257, 4, 1, rows),  # ImageLength
+        (258, 3, 1, 8),  # BitsPerSample
+        (259, 3, 1, 1),  # Compression: none
+        (262, 3, 1, 1),  # PhotometricInterpretation: BlackIsZero
+        (273, 3, rows, 0),  # StripOffsets -> the array
+        (277, 3, 1, 1),  # SamplesPerPixel
+        (278, 4, 1, 1),  # RowsPerStrip
+        (279, 3, rows, 0),  # StripByteCounts -> the same array
+    ]
+    array = 16 + 2 + 12 * len(entries) + 4
+    ifd = struct.pack("<H", len(entries)) + b"".join(
+        struct.pack("<HHII", tag, typ, count, value or array) for tag, typ, count, value in entries
+    )
+    head = b"II*\x00" + struct.pack("<I", 16) + b"\x80" * 8
+    return head + ifd + b"\x00" * 4 + struct.pack("<H", 8) * rows
+
+
+def test_tiff_strip_flood_is_refused_before_pillow_parses_it(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the builder makes a real TIFF: Pillow decodes it, one tile per strip
+    with Image.open(io.BytesIO(_strip_tiff(1000)), formats=["TIFF"]) as im:
+        assert len(im.tile) == 1000
+        im.load()
+        assert im.size == (8, 1000) and im.getpixel((3, 999)) == 0x80
+    assert ingest(_strip_tiff(1000), "rows.tif", paths=paths).height == 1000
+    # Pillow builds a tile, its extents and two ints per strip at Image.open
+    # (~320 bytes): 3 million one-row strips (24 MB of them) peaked at 914 MB
+    opened = _spy_open(monkeypatch)
+    data = _strip_tiff(3_000_000)
+    assert len(data) < 7_000_000
+    t0 = time.perf_counter()
+    with pytest.raises(UndecodableImage, match="3000000 strips") as exc:
+        ingest(data, "strips.tif", paths=paths)
+    assert exc.value.status == 422 and time.perf_counter() - t0 < 1
+    assert opened == []
+    # up to the limit they are charged; past it the file is refused
+    limit = masters.MAX_TIFF_STRIPS
+    assert masters.scan_metadata(_strip_tiff(limit), "tiff").retained >= limit * 320
+    with pytest.raises(UndecodableImage, match="strips or tiles"):
+        masters.scan_metadata(_strip_tiff(limit + 1), "tiff")
+
+
+def test_strip_and_tile_counts_come_from_every_strip_tag() -> None:
+    for tag in (0x0111, 0x0117, 0x0144, 0x0145):  # Strip/Tile Offsets/ByteCounts
+        assert masters._walk_ifds(_ifd([(tag, 4, 5000, 0)]))[1] == 5000
+        with pytest.raises(UndecodableImage, match="strips or tiles"):
+            masters.scan_metadata(_ifd([(tag, 4, masters.MAX_TIFF_STRIPS + 1, 0)]), "tiff")
+    assert masters._walk_ifds(_ifd([(0x0112, 3, 1, 1)]))[1] == 0  # Orientation is not one
+    # the largest count of any of them, not their sum
+    assert masters._walk_ifds(_ifd([(0x0111, 4, 300, 0), (0x0117, 3, 200, 0)]))[1] == 300
+    # an EXIF block is not charged per strip (getexif builds no tiles)
+    exif = _png_chunk(b"eXIf", _ifd([(0x0111, 4, 9, 0)]))
+    assert masters.scan_metadata(_png_with(before=[exif]), "png").retained < 9 * 320
+
+
+@pytest.mark.parametrize("rows_per_strip", [16, None])
+def test_striped_and_single_strip_tiffs_still_ingest(
+    paths: DataPaths, rows_per_strip: int | None
+) -> None:
+    kw: dict[str, Any] = {"tiffinfo": {278: rows_per_strip}} if rows_per_strip else {}
+    data = encode(gradient_image(2400, 1600), "TIFF", **kw)
+    strips = 1600 // rows_per_strip if rows_per_strip else 1
+    assert masters._walk_ifds(data)[1] == strips
+    meta = masters.scan_metadata(data, "tiff")
+    assert strips * 320 <= meta.retained < strips * 320 + 10_000
+    m = ingest(data, "scan.tif", paths=paths)
+    assert (m.width, m.height) == (1800, 1200)
+
+
+def _tiff_load_peak(data: bytes) -> int:
+    """tracemalloc's peak while Pillow opens and loads the TIFF ``data`` and
+    its orientation is read, as ``_decode_pillow`` does."""
+    tracemalloc.start()
+    try:
+        with Image.open(io.BytesIO(data), formats=["TIFF"]) as im:
+            im.load()
+            masters._orientation(im)
+            return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_tiff_tag_data_is_charged_twice() -> None:
+    # Pillow reads a TIFF's IFD0 into tag_v2 at Image.open and again for
+    # getexif() while it loads the pixels: both copies live until the master
+    im = Image.new("RGB", (64, 64), (1, 2, 3))
+    data = encode(im, "TIFF", tiffinfo={40000 + i: b"x" * 50_000 for i in range(20)})
+    charged = masters.scan_metadata(data, "tiff").retained
+    assert charged >= 2 * 20 * 50_000
+    built = _tiff_load_peak(data) - _tiff_load_peak(encode(im, "TIFF"))
+    # the entries' own dict slots (~350 bytes each) are left to the margin
+    assert 2 * 20 * 50_000 <= built <= charged * masters._COST_MARGIN
+
+
+# --- the MPF segment's MP index -----------------------------------------------------------
+
+
+def _mpf_index(n_tags: int, typ: int, count: int, size: int = 65_000) -> bytes:
+    """A little-endian MP index (the TIFF block of an APP2 ``MPF\\0``
+    segment) of ``n_tags`` tags of field type ``typ``, each holding
+    ``count`` values read from offset 8 (the index itself, padded to
+    ``size`` bytes with noise, so the values are not cached small ints)."""
+    entries = b"".join(struct.pack("<HHII", 40000 + i, typ, count, 8) for i in range(n_tags))
+    blob = b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", n_tags) + entries + b"\x00" * 4
+    noise = np.random.default_rng(1).integers(1, 256, max(0, size - len(blob)), np.uint8)
+    return blob + noise.tobytes()
+
+
+def _jpeg_with_mpf(index: bytes) -> bytes:
+    """A 16 x 16 JPEG with ``index`` in an APP2 ``MPF\\0`` segment."""
+    jpeg = jpeg_bytes(Image.new("RGB", (16, 16), (200, 10, 10)))
+    payload = b"MPF\x00" + index
+    assert len(payload) + 2 <= 0xFFFF
+    return jpeg[:2] + b"\xff\xe2" + struct.pack(">H", len(payload) + 2) + payload + jpeg[2:]
+
+
+def test_mp_index_bombs_are_refused_before_pillow_parses_them(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pillow parses every JPEG's MP index inside Image.open (``_getmp``):
+    # 5450 tags all reading one 65 KB region made a 66 KB JPEG peak at 356 MB
+    opened = _spy_open(monkeypatch)
+    flood = _jpeg_with_mpf(_mpf_index(5450, 7, 65_000))
+    assert len(flood) < 70_000
+    with pytest.raises(UndecodableImage, match="5450 tags") as exc:
+        ingest(flood, "mpf.jpg", paths=paths)
+    assert exc.value.status == 422
+    # and it unpacks every value into a Python object (``dict(ifd)``), where
+    # getexif keeps raw bytes: 1800 tags of 16 000 LONGs are 115 MB of raw
+    # values, which the default budget would let in, but 1.3 GB of ints
+    longs = _jpeg_with_mpf(_mpf_index(1800, 4, 16_000))
+    assert len(longs) < 70_000
+    assert masters.scan_metadata(longs, "jpeg").retained >= 1800 * 16_000 * 44
+    with pytest.raises(UndecodableImage, match="metadata"):
+        ingest(longs, "mpf.jpg", paths=paths)
+    assert opened == []
+
+
+def _open_peak(data: bytes) -> int:
+    """tracemalloc's peak while ``Image.open`` parses the JPEG ``data``."""
+    tracemalloc.start()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # "malformed MPO": no image count in the index
+            with Image.open(io.BytesIO(data), formats=["JPEG"]):
+                return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize("typ", [1, 2, 3, 4, 5, 6, 7, 11, 12])  # BYTE, ASCII ... DOUBLE
+def test_mp_index_charge_covers_what_pillow_builds(typ: int) -> None:
+    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 11: 4, 12: 8}[typ]
+    data = _jpeg_with_mpf(_mpf_index(20, typ, 8000 // size, size=9000))
+    charged = masters.scan_metadata(data, "jpeg").retained
+    built = _open_peak(data) - _open_peak(jpeg_bytes(Image.new("RGB", (16, 16), (200, 10, 10))))
+    assert 20 * 8000 <= built <= charged
+
+
+def test_ifd_walker_counts_unpacked_values_for_an_mp_index() -> None:
+    walk = masters._ifd_materialised_bytes
+    assert walk(_ifd([(1, 4, 1000, 0)])) == 4000  # getexif: raw bytes only
+    # measured: 38 to 44 bytes a SHORT/LONG/FLOAT/DOUBLE, ~245 a RATIONAL,
+    # ~440 an entry and ~680 per image of the MP Entry list
+    assert walk(_ifd([(1, 4, 1000, 0)]), objects=True) >= 440 + 1000 * 44
+    assert walk(_ifd([(1, 3, 1000, 0)]), objects=True) >= 440 + 1000 * 38
+    assert walk(_ifd([(1, 5, 1000, 0)]), objects=True) >= 440 + 1000 * 245
+    assert walk(_ifd([(1, 2, 1000, 0)]), objects=True) >= 440 + 1000 * 2.4  # copied as a str
+    assert walk(_ifd([(1, 7, 1000, 0)]), objects=True) < 1000 + 1000  # UNDEFINED stays bytes
+    assert walk(_ifd([(0xB002, 7, 16 * 10, 0)]), objects=True) >= 10 * 680
+
+
+def test_benign_mpo_still_ingests(paths: DataPaths) -> None:
+    # what phones write: a primary JPEG whose MP index lists it and a preview
+    im = gradient_image(640, 480)
+    for data in (_mpo(im, quality=85), _mpo(im, quality=85, progressive=True)):
+        head = masters._walk_jpeg(data)
+        assert len(head.mpf) == 1 and head.mpf[0][:4] in (b"II*\x00", b"MM\x00*")
+        assert masters.scan_metadata(data, "jpeg").retained < 20_000
+        m = ingest(data, "phone.jpg", paths=paths)
+        assert (m.width, m.height) == (640, 480) and m.source_format == "jpeg"
+
+
+# --- JPEG scans and tables ----------------------------------------------------------------
+
+
+def _with_scans(jpeg: bytes, extra: int) -> bytes:
+    """``jpeg`` with its last scan (the SOS header and its entropy-coded
+    data) repeated ``extra`` more times before EOI.  libjpeg still decodes
+    it, one more pass over the image per scan (a 5 KB file of 210 scans
+    decodes 28 times slower than its 10-scan original)."""
+    last = jpeg.rindex(b"\xff\xda")
+    assert jpeg.endswith(b"\xff\xd9")
+    return jpeg[:-2] + jpeg[last:-2] * extra + jpeg[-2:]
+
+
+def test_jpeg_scans_are_limited(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    im = gradient_image(320, 240)
+    baseline = jpeg_bytes(im)  # one scan
+    progressive = jpeg_bytes(im, progressive=True)  # libjpeg's script: 10 scans
+    opened = _spy_open(monkeypatch)
+    for data in (baseline, progressive):
+        assert ingest(data, "ok.jpg", paths=paths).width == 320
+    flood = _with_scans(progressive, 200)
+    t0 = time.perf_counter()
+    with pytest.raises(UndecodableImage, match="more than 64 scans") as exc:
+        ingest(flood, "scans.jpg", paths=paths)
+    assert exc.value.status == 422 and time.perf_counter() - t0 < 1
+    assert len(opened) == 2  # refused before Pillow opened it
+    # the limit is inclusive, and scans are counted up to the first EOI: an
+    # MPO's later images (each with its own scans) are not decoded
+    monkeypatch.setattr(masters, "MAX_JPEG_SCANS", 10)
+    ingest(progressive, "ten.jpg", paths=paths)
+    ingest(_mpo(im, progressive=True), "two-images.jpg", paths=paths)
+    with pytest.raises(UndecodableImage, match="more than 10 scans"):
+        ingest(_with_scans(progressive, 1), "eleven.jpg", paths=paths)
+    # restart markers and stuffed bytes inside a scan are not scans
+    restarts = encode(gradient_image(640, 480), "JPEG", quality=95, restart_marker_rows=1)
+    assert sum(restarts.count(bytes((0xFF, 0xD0 + n))) for n in range(8)) > 20
+    ingest(restarts, "restarts.jpg", paths=paths)
+
+
+def _dqt(tables: int) -> bytes:
+    """A DQT segment of ``tables`` 8-bit quantisation tables (all id 0)."""
+    payload = (b"\x00" + bytes(range(1, 65))) * tables
+    return b"\xff\xdb" + struct.pack(">H", len(payload) + 2) + payload
+
+
+def test_jpeg_tables_are_limited(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pillow parses every DQT table before the first scan in Python (25 MB of
+    # them take 0.8 s on the desktop); a segment can hold a thousand
+    jpeg = jpeg_bytes(Image.new("RGB", (16, 16), (200, 10, 10)))  # 2 DQT and 4 DHT tables
+    first = 4 + int.from_bytes(jpeg[4:6], "big")  # after the APP0 segment
+    limit = masters.MAX_JPEG_TABLES
+    opened = _spy_open(monkeypatch)
+    for extra in (_dqt(1) * (limit - 5), _dqt(limit - 5)):  # one table over, either way
+        with pytest.raises(UndecodableImage, match="tables") as exc:
+            ingest(jpeg[:first] + extra + jpeg[first:], "tables.jpg", paths=paths)
+        assert exc.value.status == 422
+    assert opened == []
+    for extra in (_dqt(1) * (limit - 6), _dqt(limit - 6)):  # exactly at the limit
+        ingest(jpeg[:first] + extra + jpeg[first:], "tables.jpg", paths=paths)
+    # the Huffman tables between a progressive JPEG's scans count too
+    progressive = jpeg_bytes(gradient_image(320, 240), progressive=True)  # 4 + 8 tables
+    monkeypatch.setattr(masters, "MAX_JPEG_TABLES", 12)
+    ingest(progressive, "twelve.jpg", paths=paths)
+    monkeypatch.setattr(masters, "MAX_JPEG_TABLES", 11)
+    with pytest.raises(UndecodableImage, match="more than 11"):
+        ingest(progressive, "twelve.jpg", paths=paths)

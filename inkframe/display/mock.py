@@ -6,7 +6,7 @@ so scheduler bugs surface on the desktop.  Instead of driving SPI it writes
 what the panel would show:
 
 * ``<data>/last_frame.png``: the frame in the panel's (measured) colours, RGB
-  600 x 400, i.e. what Adam would see on the wall;
+  600 x 400, i.e. what the owner would see on the wall;
 * ``<data>/last_frame.bin``: the exact 120000 bytes the driver would send.
 
 Both files are replaced atomically so a reader never sees half a frame.

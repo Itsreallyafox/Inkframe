@@ -26,7 +26,9 @@ def update_settings(
 
     Nested objects merge key by key; lists (``rotation``, ``quiet_hours.days``)
     are replaced whole.  Unknown keys or invalid values: 422 with the reason.
-    The scheduler is woken so a new floor, quiet window or rotation applies now.
+    The scheduler is woken so a new floor, quiet window or rotation applies now;
+    a palette or default-recipe change also marks the panel stale so the photo on
+    it is repainted at the next rotation change.
     """
     try:
         saved = store.patch(patch).to_dict()
@@ -34,5 +36,9 @@ def update_settings(
         raise HTTPException(status_code=422, detail=str(e)) from None
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
+        if "palette" in patch or "default_recipe" in patch:
+            # the photo on the panel may now render differently: repaint it at
+            # the next rotation change instead of skipping it as already showing
+            scheduler.invalidate()
         scheduler.wake()
     return saved

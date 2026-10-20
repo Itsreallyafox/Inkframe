@@ -26,6 +26,7 @@ from inkframe.paths import DataPaths
 from inkframe.render import masters, pipeline
 from inkframe.render.cache import RenderCache, decode_png
 from inkframe.render.dither import METHOD_IDS, METHODS
+from inkframe.scheduler import local_now
 from tests.conftest import encode, gradient_image, heic_bytes, jpeg_bytes
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -280,6 +281,94 @@ def test_recipe_put_without_fields_pins_nothing(client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["recipe"] == own
 
 
+# --- recipe changes reach the scheduler ------------------------------------------------------
+
+
+def _spy_scheduler(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record the app's scheduler ``invalidate``/``wake`` calls; both still run."""
+    sched = client.app.state.scheduler
+    invalidate, wake = sched.invalidate, sched.wake
+    calls: list[Any] = []
+
+    def spy_invalidate(photo_id: str | None = None) -> bool:
+        calls.append(("invalidate", photo_id))
+        return invalidate(photo_id)
+
+    def spy_wake() -> None:
+        calls.append("wake")
+        wake()
+
+    monkeypatch.setattr(sched, "invalidate", spy_invalidate)
+    monkeypatch.setattr(sched, "wake", spy_wake)
+    return calls
+
+
+def _show_on_panel(client: TestClient, photo_id: str) -> dict[str, Any]:
+    """Put a photo on the (mock) panel through show-now and one scheduler tick;
+    returns the scheduler's persisted state (``db`` key ``scheduler``)."""
+    assert client.post("/api/display/show", json={"photo_id": photo_id}).status_code == 200
+    client.app.state.scheduler.tick(local_now())
+    state = client.app.state.db.get_state("scheduler")
+    assert state["showing"]["id"] == photo_id and state["panel_stale"] is False
+    return state
+
+
+def _panel_stale(client: TestClient) -> bool:
+    return client.app.state.db.get_state("scheduler")["panel_stale"]
+
+
+def test_recipe_put_invalidates_the_photo(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60), (200, 100, 50)))).json()["id"]
+    calls = _spy_scheduler(client, monkeypatch)
+    assert client.put(f"/api/photos/{pid}/recipe", json={"gamma": 1.2}).status_code == 200
+    assert calls == [("invalidate", pid)]
+    # nothing stored (no fields, or a 422): nothing to repaint
+    for body in ({}, {"reset": False}, {"strength": 0.1}, {"reset": True, "gamma": 1.2}):
+        client.put(f"/api/photos/{pid}/recipe", json=body)
+    assert calls == [("invalidate", pid)]
+    # dropping the override changes the render too
+    assert client.put(f"/api/photos/{pid}/recipe", json={"reset": True}).status_code == 200
+    assert calls == [("invalidate", pid)] * 2
+    assert client.put(f"/api/photos/{'a' * 32}/recipe", json={"gamma": 1.2}).status_code == 404
+    assert calls == [("invalidate", pid)] * 2
+
+
+def test_recipe_put_marks_the_panel_stale_for_the_photo_on_it(client: TestClient) -> None:
+    shown = upload(client, jpeg_bytes(Image.new("RGB", (90, 60), (200, 100, 50)))).json()["id"]
+    other = upload(client, jpeg_bytes(Image.new("RGB", (90, 60), (20, 60, 150)))).json()["id"]
+    _show_on_panel(client, shown)
+    assert client.put(f"/api/photos/{other}/recipe", json={"gamma": 1.2}).status_code == 200
+    assert _panel_stale(client) is False  # another photo's recipe: the panel is current
+    assert client.put(f"/api/photos/{shown}/recipe", json={"gamma": 1.2}).status_code == 200
+    assert _panel_stale(client) is True  # the next rotation change repaints it
+
+
+def test_recipe_reset_marks_the_panel_stale(client: TestClient) -> None:
+    pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60), (200, 100, 50)))).json()["id"]
+    client.put(f"/api/photos/{pid}/recipe", json={"method": "stucki"})
+    _show_on_panel(client, pid)
+    assert client.put(f"/api/photos/{pid}/recipe", json={}).status_code == 200
+    assert _panel_stale(client) is False
+    assert client.put(f"/api/photos/{pid}/recipe", json={"reset": True}).status_code == 200
+    assert _panel_stale(client) is True
+
+
+def test_default_recipe_put_invalidates_and_wakes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60), (200, 100, 50)))).json()["id"]
+    _show_on_panel(client, pid)
+    calls = _spy_scheduler(client, monkeypatch)
+    assert client.put("/api/recipe/default", json={"strength": 1.5}).status_code == 422
+    assert calls == [] and _panel_stale(client) is False
+    assert client.put("/api/recipe/default", json={"method": "burkes"}).status_code == 200
+    # no photo id: every photo that follows the default may render differently
+    assert calls == [("invalidate", None), "wake"]
+    assert _panel_stale(client) is True
+
+
 def test_huge_integer_knob_is_422_not_500(client: TestClient) -> None:
     pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60)))).json()["id"]
     huge = "1" + "0" * 400  # valid JSON; float() of it raises OverflowError
@@ -451,6 +540,28 @@ def test_measured_palette_change_changes_keys_and_png_colours(client: TestClient
     data = client.get(now["render_url"]).content
     with Image.open(io.BytesIO(data)) as im:
         assert im.getpalette()[12:15] == tuned
+
+
+def test_use_measured_off_dithers_against_nominal(client: TestClient, data_dir: Path) -> None:
+    # Settings' "Use the measured palette" is a global switch: off, a recipe
+    # that asks for "measured" dithers against the nominal primaries
+    on = upload(client, jpeg_bytes(gradient_image(600, 400))).json()
+    pid = on["id"]
+    assert on["recipe_effective"]["palette"] == "measured"
+    r = client.put("/api/settings", json={"palette": {"use_measured": False}})
+    assert r.status_code == 200 and r.json()["palette"]["use_measured"] is False
+    off = client.get(f"/api/photos/{pid}").json()
+    assert off["recipe_effective"] == on["recipe_effective"]  # the recipe itself is unchanged
+    assert off["render_key"] != on["render_key"] and off["render_ready"] is False
+    data = client.get(off["render_url"]).content
+    master = Image.open(data_dir / "masters" / f"{pid}.jpg")
+    nominal = pipeline.render_frame(pipeline.fit_image(master), RECIPE, pipeline.NOMINAL)
+    assert np.array_equal(_decode(data), nominal)
+    assert not np.array_equal(nominal, _direct_render(data_dir, on, RECIPE))
+    with Image.open(io.BytesIO(data)) as im:  # still coloured as the panel shows them
+        assert im.getpalette()[:18] == MEASURED_DEFAULT.flat()
+    client.put("/api/settings", json={"palette": {"use_measured": True}})
+    assert client.get(f"/api/photos/{pid}").json()["render_key"] == on["render_key"]
 
 
 def test_portrait_upload(client: TestClient) -> None:

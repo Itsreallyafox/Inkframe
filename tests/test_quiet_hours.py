@@ -190,7 +190,7 @@ def test_show_now_during_quiet_hours(make_rig) -> None:
     info = rig.sched.show_now(app_id="gamma")
     assert info["fires_at"] == iso(at(19, 23, 30))
     rig.tick()
-    assert rig.shows == 2 and rig.shown_id() == "gamma"  # it's Adam's choice
+    assert rig.shows == 2 and rig.shown_id() == "gamma"  # the owner's choice
     rig.clock.set(at(19, 23, 31))
     rig.sched.show_next()
     rig.tick()

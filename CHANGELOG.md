@@ -1,10 +1,160 @@
 # Changelog
 
-All notable changes to Inkframe. One entry per build phase; dates are UTC.
+All notable changes to Inkframe. One entry per build phase; dates are local (America/New_York).
+
+## 0.1.0 — Phase 8: final review (2026-10-20)
+
+- Upload hardening: the per-strip tables Pillow builds for a TIFF and a
+  JPEG's MPF (APP2) metadata are now charged against the 150 MB ingest
+  budget, so small crafted files can no longer allocate hundreds of MB; the
+  number of JPEG scans is capped, so a file of tiny progressive scans cannot
+  hold the render thread for minutes.
+- Request bodies are capped at 1 MiB (413) on every route but the photo
+  upload, which keeps its 25 MiB limit; JSON bodies had no limit before.
+- A Host/Origin check: a request that may change something gets a 403
+  unless its `Host` names the frame (`localhost`, `inkframe`, `*.local`, a
+  private IP, the machine's hostname or a name in `INKFRAME_ALLOWED_HOSTS`)
+  and its `Origin`, if any, matches. A web page the owner visits can no
+  longer restart, pause or upload to the frame, and DNS rebinding is
+  refused.
+- App settings fields have caps: text 500 characters, textarea 20000, lists
+  100 entries of at most 2000 characters (a single PUT could store
+  megabytes before). The form gets them as `maxlength` and `max_items`.
+- `Scheduler.invalidate()` is wired to recipe changes, so the photo on the
+  panel is repainted with its new recipe instead of being skipped as already
+  showing.
+- `palette.use_measured` is now a global switch: off, every photo renders
+  against the nominal primaries whatever its recipe says.
+- Graceful shutdown is bounded: on SIGTERM uvicorn waits at most 30 s for
+  open requests, so a stalled upload (up to 300 s) can no longer hold off
+  the scheduler's stop until systemd's SIGKILL at 150 s.
+- `install.sh` installs the requirements with `--only-binary=:all:` (a
+  missing wheel fails at once instead of compiling on the Pi) and adds
+  `raspi-utils-core` (`pinctrl`) to its apt packages. The unit drives RST,
+  PWR and DC low with `pinctrl` before start too (`ExecStartPre`), as it
+  already did after every stop.
+- Docs: the README is now the user guide; new `CLAUDE.md` (architecture
+  notes for Claude Code sessions) and `docs/ROUGH_EDGES.md` (what is still
+  open); `docs/DEPLOY.md` describes the unit as it ships (epd);
+  `docs/SCHEDULER.md` corrections; two Settings screenshots that showed a
+  local home path were removed from `docs/ui/`.
+
+## 0.1.0 — Phase 7: hardware bring-up (2026-10-19)
+
+- The systemd unit now sets `INKFRAME_DISPLAY=epd` (commit `1628e1a`), so
+  the service drives the real panel through `SpidevBus` and `GpiozeroGpio`.
+- First real refresh: 19.1 s.
+- The palette test card confirmed the six colours and the orientation. This
+  frame needed `display.rotation` 270, saved in its settings; the code
+  default stays 90.
+- First photo shown on the panel. A 12-method preview set took 2.3 s, with
+  the service at 60 MB RSS on the epd build.
+- Rotation resumed for the overnight soak.
+
+## 0.1.0 — Phase 6: scheduler (2026-10-19)
+
+- `inkframe.scheduler.Scheduler`, the only thing that drives the panel. It
+  enforces the panel-care rules in code:
+  - the refresh floor, measured from the end of the last attempt (failed
+    attempts count);
+  - show-now, the one bypass of the floor, which still waits
+    `show_now_min_seconds`; one pending request, a newer one replaces it, and
+    `fires_at` is reported for the UI countdown;
+  - a keep-alive that re-shows the last frame byte for byte while paused or in
+    quiet hours;
+  - `init -> [clear] -> show -> sleep` with `sleep()` in a `finally`;
+  - quiet hours, as windows that start on the listed weekdays and may cross
+    midnight;
+  - render failures skipped slot by slot, with a 60 s backoff when every slot
+    fails. A timed-out render is cancelled, or, while it still runs, later
+    renders fail at once instead of queueing behind it. A photo list that
+    cannot be read fails the photos slot the same way instead of stopping
+    every refresh, the keep-alive included;
+  - display failures logged and counted as attempts. The last good frame is
+    written back to disk after a failed refresh, and the panel counts as
+    stale, so the next rotation change repaints even the same photo;
+  - every rendered frame validated before the panel is touched (an invalid
+    frame from the dither path is a render failure, not a panel failure),
+    and a render raising `SystemExit` skipped like any other failure instead
+    of ending the scheduler thread.
+
+  Its decision core `tick(now)` returns the next delay. It runs on a daemon
+  thread that `wake()` interrupts.
+- Photos slot: dwell (default 3 min), shuffle (avoids the last
+  `min(n - 1, 20)`) or sequential (`created_at` order), and a "no photos" card
+  that lasts one dwell. A photo change that would push the slot past its end
+  is skipped, and an identical photo is never re-shown.
+- State survives restart. It is stored under the db key `scheduler`, mirrored
+  to `last_refresh_at`/`last_source`, with the frame in
+  `last_frame.bin`/`.png`. That covers the rotation position, timing anchors,
+  recent photos and the frame to keep alive. Unreadable state, even a row
+  that is not JSON, gives defaults instead of stopping the boot, and
+  `/api/status` reports it as unknown instead of failing. A lost attempt
+  anchor falls back to the last refresh, so the floor survives it.
+- Settings: `panel.refresh_floor_seconds` may not exceed
+  `panel.keepalive_hours`, since a longer floor would hold the keep-alive
+  back.
+- Shutdown waits up to 100 s for a refresh in flight (not for a render), and
+  leaves the display to a refresh that is still running; the systemd unit's
+  `TimeoutStopSec` is now 150 s. `Scheduler.invalidate()` is the hook for
+  repainting a photo whose recipe changed (the recipe routes call it since
+  Phase 8).
+- Clock safety for a Pi without an RTC. The floor and the show-now minimum are
+  measured on the wall clock and the monotonic clock, so no clock step
+  shortens them. Wall-clock jumps are detected against the monotonic clock and
+  the timers shifted. Anchors loaded from disk move only in their safe
+  direction, so NTP's first step after a power cut never postpones the
+  keep-alive. Anchors found in the future after a restart are clamped. A
+  DST-aware `now_fn` is handled at its offset of the moment.
+- API: `POST /api/display/next|pause|resume|show`, `GET/PUT /api/rotation`,
+  `GET /api/apps`, `GET/PUT /api/apps/{id}/settings` and
+  `GET /api/apps/{id}/preview.png`. Previews run on the render executor, never
+  the panel. `/api/status` keeps its Phase 1 keys and adds
+  `panel.last_attempt_at`, `panel.last_error`, `rotation.quiet`,
+  `rotation.quiet_until` and `rotation.pending`; it also fills `current`,
+  `next`, `next_at` and `keepalive_at`.
+- `create_app(scheduler=False)` and `INKFRAME_SCHEDULER=off` build the
+  scheduler without starting its thread. `INKFRAME_OFFLINE=1` makes scheduler
+  and preview renders offline. Shutdown stops the scheduler before the
+  display. An app that fails to import is logged and skipped instead of
+  stopping the frame from booting.
+- `inkframe/apps/photos.py`: a stub photos app (a "no photos" card and a
+  placeholder per photo) that Phase 3 replaces.
+- Fake-clock tests for every rule (`tests/test_scheduler.py`,
+  `tests/test_quiet_hours.py`) and API tests (`tests/test_api_display.py`,
+  `tests/test_api_apps.py`). Design notes are in `docs/SCHEDULER.md`.
+
+## 0.1.0 — Phase 5: apps (2026-10-19)
+
+- App contract (`inkframe/apps/base.py`): the `App` protocol, a `Field`
+  settings schema with coercion and validation, `RenderContext`,
+  `FontLibrary` and `render_to_frame`, which dithers an app's image or, for
+  an app that draws in the palette (`needs_dither=False`), checks that it
+  uses only the six nominal colours. A static registry (`APP_IDS`,
+  `load_app`), and `apps/draw.py`'s `Canvas`, limited to the six colours,
+  with thresholded text, wrapping and fitting, and stripe, dot and checker
+  textures.
+- Weather: Open-Meteo now, next hours and five days in three layouts (or a
+  different one each hour), place name or `lat,lon`, metric or imperial.
+  Forecasts are cached 15 minutes, geocoding for good.
+- Headlines: RSS/Atom top stories (feedparser) set like a front page in
+  three layouts; BBC, NYT and Guardian by default, fetched in parallel with
+  a 9.5 s cap and cached 15 minutes, stale data marked "offline" in red.
+- Patterns: Truchet, Bauhaus, halftone, flow field and concentric prints
+  with density and palette moods, plus the palette test card (an arrow and a
+  "TOP LEFT" label for checking the orientation). No network.
+- Quotes: 311 bundled public-domain quotes that work offline, three layouts,
+  tags and length filters; optional ZenQuotes with the attribution its terms
+  require, falling back to the bundled set.
+- Every app degrades to a cached or "offline" card instead of failing.
+- Bundled fonts: Playfair Display 1.202, Inter 4.1 and JetBrains Mono 2.304,
+  SIL Open Font License 1.1, unmodified, with each family's `OFL.txt`.
+- Tests against recorded fixtures (never the network) and 43 preview cards
+  in `docs/previews/`.
 
 ## 0.1.0 — Phase 4: web UI (2026-10-20)
 
-- Mobile-first no-build UI (184 KB of HTML/CSS/JS, one font file): Now
+- Mobile-first no-build UI (215 KB of HTML/CSS/JS, one font file): Now
   (the last frame pixel-perfect in a bezel, what is showing and next,
   pause/resume/show-next, panel status), Photos (grid of dithered renders,
   drop zone with browser-side downscale and per-file progress), Editor
@@ -92,77 +242,6 @@ All notable changes to Inkframe. One entry per build phase; dates are UTC.
 - Pi pass: 2400x1600 upload 1.7 s, 12-method preview set 2.2 s (cached 0.1 s),
   service RSS peak 115 MB, scheduler shows the uploaded photo.
 
-## 0.1.0 — Phase 6: scheduler (2026-10-19)
-
-- `inkframe.scheduler.Scheduler`, the only thing that drives the panel. It
-  enforces the panel-care rules in code:
-  - the refresh floor, measured from the end of the last attempt (failed
-    attempts count);
-  - show-now, the one bypass of the floor, which still waits
-    `show_now_min_seconds`; one pending request, a newer one replaces it, and
-    `fires_at` is reported for the UI countdown;
-  - a keep-alive that re-shows the last frame byte for byte while paused or in
-    quiet hours;
-  - `init -> [clear] -> show -> sleep` with `sleep()` in a `finally`;
-  - quiet hours, as windows that start on the listed weekdays and may cross
-    midnight;
-  - render failures skipped slot by slot, with a 60 s backoff when every slot
-    fails. A timed-out render is cancelled, or, while it still runs, later
-    renders fail at once instead of queueing behind it. A photo list that
-    cannot be read fails the photos slot the same way instead of stopping
-    every refresh, the keep-alive included;
-  - display failures logged and counted as attempts. The last good frame is
-    written back to disk after a failed refresh, and the panel counts as
-    stale, so the next rotation change repaints even the same photo;
-  - every rendered frame validated before the panel is touched (an invalid
-    frame from the dither path is a render failure, not a panel failure),
-    and a render raising `SystemExit` skipped like any other failure instead
-    of ending the scheduler thread.
-
-  Its decision core `tick(now)` returns the next delay. It runs on a daemon
-  thread that `wake()` interrupts.
-- Photos slot: dwell (default 3 min), shuffle (avoids the last
-  `min(n - 1, 20)`) or sequential (`created_at` order), and a "no photos" card
-  that lasts one dwell. A photo change that would push the slot past its end
-  is skipped, and an identical photo is never re-shown.
-- State survives restart. It is stored under the db key `scheduler`, mirrored
-  to `last_refresh_at`/`last_source`, with the frame in
-  `last_frame.bin`/`.png`. That covers the rotation position, timing anchors,
-  recent photos and the frame to keep alive. Unreadable state, even a row
-  that is not JSON, gives defaults instead of stopping the boot, and
-  `/api/status` reports it as unknown instead of failing. A lost attempt
-  anchor falls back to the last refresh, so the floor survives it.
-- Settings: `panel.refresh_floor_seconds` may not exceed
-  `panel.keepalive_hours`, since a longer floor would hold the keep-alive
-  back.
-- Shutdown waits up to 100 s for a refresh in flight (not for a render), and
-  leaves the display to a refresh that is still running; the systemd unit's
-  `TimeoutStopSec` is now 150 s. `Scheduler.invalidate()` lets Phase 3
-  repaint a photo whose recipe changed.
-- Clock safety for a Pi without an RTC. The floor and the show-now minimum are
-  measured on the wall clock and the monotonic clock, so no clock step
-  shortens them. Wall-clock jumps are detected against the monotonic clock and
-  the timers shifted. Anchors loaded from disk move only in their safe
-  direction, so NTP's first step after a power cut never postpones the
-  keep-alive. Anchors found in the future after a restart are clamped. A
-  DST-aware `now_fn` is handled at its offset of the moment.
-- API: `POST /api/display/next|pause|resume|show`, `GET/PUT /api/rotation`,
-  `GET /api/apps`, `GET/PUT /api/apps/{id}/settings` and
-  `GET /api/apps/{id}/preview.png`. Previews run on the render executor, never
-  the panel. `/api/status` keeps its Phase 1 keys and adds
-  `panel.last_attempt_at`, `panel.last_error`, `rotation.quiet`,
-  `rotation.quiet_until` and `rotation.pending`; it also fills `current`,
-  `next`, `next_at` and `keepalive_at`.
-- `create_app(scheduler=False)` and `INKFRAME_SCHEDULER=off` build the
-  scheduler without starting its thread. `INKFRAME_OFFLINE=1` makes scheduler
-  and preview renders offline. Shutdown stops the scheduler before the
-  display. An app that fails to import is logged and skipped instead of
-  stopping the frame from booting.
-- `inkframe/apps/photos.py`: a stub photos app (a "no photos" card and a
-  placeholder per photo) that Phase 3 replaces.
-- Fake-clock tests for every rule (`tests/test_scheduler.py`,
-  `tests/test_quiet_hours.py`) and API tests (`tests/test_api_display.py`,
-  `tests/test_api_apps.py`). Design notes are in `docs/SCHEDULER.md`.
 ## 0.1.0 — Phase 2: dither engine (2026-10-19)
 
 - `inkframe/render/dither.c`: all 12 methods (nearest, 8 error-diffusion

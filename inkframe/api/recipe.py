@@ -19,13 +19,17 @@ ignored, so a ``GET`` body can be edited and sent back), merges it over the
 current default, validates it (422 naming the field) and saves it in
 ``settings.json``.  Existing photos are not re-rendered eagerly: their render
 keys change and the new renders happen lazily when the grid asks for them.
+The scheduler is told the panel may be outdated (``invalidate()`` with no
+photo id: any photo following the default would render differently) and
+woken, so the next rotation change repaints even the photo already on the
+panel; nothing is refreshed early.
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 
 from inkframe.api import SettingsDep
 from inkframe.config import RECIPE_DISTANCES, RECIPE_PALETTES, RECIPE_RANGES, Settings
@@ -69,9 +73,10 @@ def read_default_recipe(store: SettingsDep) -> dict[str, Any]:
 
 @router.put("/default")
 def update_default_recipe(
-    body: Annotated[dict[str, Any], Body()], store: SettingsDep
+    body: Annotated[dict[str, Any], Body()], request: Request, store: SettingsDep
 ) -> dict[str, Any]:
-    """Merge a full or partial recipe over the default and save it."""
+    """Merge a full or partial recipe over the default and save it, then mark
+    the panel stale and wake the scheduler (see the module docstring)."""
     patch = {k: v for k, v in body.items() if k not in META_KEYS}
 
     def merge(current: Settings) -> Settings:
@@ -86,4 +91,8 @@ def update_default_recipe(
         settings = store.update(merge)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is not None:
+        scheduler.invalidate()  # no id: every photo that follows the default
+        scheduler.wake()
     return _payload(settings)

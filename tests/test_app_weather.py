@@ -417,7 +417,7 @@ def test_fetch_json_maps_every_failure_to_fetch_error(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(weather.httpx, "get", respond(httpx.Response(200, json={"ok": 1})))
     assert weather.fetch_json(weather.FORECAST_URL, {"a": 1}, 4.0) == {"ok": 1}
-    assert seen["headers"]["User-Agent"] == "Inkframe/0.1 (+https://github.com/inkframe)"
+    assert seen["headers"]["User-Agent"] == weather.USER_AGENT
     assert seen["timeout"].read == 4.0 and seen["params"] == {"a": 1}
 
     bad = httpx.Response(400, json={"error": True, "reason": "Latitude must be in range"})

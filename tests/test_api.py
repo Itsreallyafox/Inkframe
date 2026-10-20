@@ -1,8 +1,11 @@
 """HTTP API: health, status shape, settings GET/PUT, index page, logs,
-restart, the fonts mount."""
+restart, the fonts mount, the request guard (body caps, cross-site
+requests)."""
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 import os
@@ -10,15 +13,22 @@ import signal
 import sys
 import threading
 import warnings
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
+from PIL import Image
+from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
 
+from inkframe import app as app_module
 from inkframe.api import system as system_api
-from inkframe.app import create_app
+from inkframe.app import MAX_BODY_BYTES, allowed_hosts_from_env, create_app, host_is_local
 from inkframe.config import SettingsStore
 from inkframe.display import factory
 from inkframe.display.base import DisplayError
@@ -364,3 +374,335 @@ def test_factory_unknown_kind(data_dir: Path, settings_store: SettingsStore) -> 
         factory.create_display(" Mock ", data_dir=data_dir, settings_store=settings_store),
         MockDisplay,
     )
+
+
+# --- request guard: body caps -----------------------------------------------------------
+
+TOO_LARGE = {"error": "request body too large (limit 1 MB)"}
+
+
+def test_a_json_body_over_1_mb_is_413(client: TestClient) -> None:
+    before = client.get("/api/settings").json()
+    pad = b"x" * (2 * 1024 * 1024)
+    body = b'{"panel": {"refresh_floor_seconds": 300}, "pad": "' + pad + b'"}'
+    r = client.put("/api/settings", content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 413 and r.json() == TOO_LARGE
+    assert client.get("/api/settings").json() == before
+    # the cap is on every route, whether or not it reads a body
+    r = client.post("/api/display/pause", content=pad)
+    assert r.status_code == 413 and r.json() == TOO_LARGE
+    assert client.get("/api/status").json()["rotation"]["paused"] is False
+    # a normal PUT still works
+    r = client.put("/api/settings", json={"panel": {"refresh_floor_seconds": 300}})
+    assert r.status_code == 200 and r.json()["panel"]["refresh_floor_seconds"] == 300
+
+
+def test_the_body_cap_is_exactly_1_mib(client: TestClient) -> None:
+    head = b'{"paused": true}'
+    body = head + b" " * (MAX_BODY_BYTES - len(head))
+    json_type = {"content-type": "application/json"}
+    assert len(body) == MAX_BODY_BYTES == 1024 * 1024
+    r = client.put("/api/settings", content=body, headers=json_type)
+    assert r.status_code == 200 and r.json()["paused"] is True
+    r = client.put("/api/settings", content=body + b" ", headers=json_type)
+    assert r.status_code == 413 and r.json() == TOO_LARGE
+
+
+def test_a_chunked_json_body_over_1_mb_is_413(client: TestClient) -> None:
+    before = client.get("/api/settings").json()
+
+    def chunks() -> Iterator[bytes]:
+        yield b'{"paused": true, "pad": "'
+        for _ in range(40):
+            yield b"x" * 65536
+        yield b'"}'
+
+    # an iterator body goes out chunked, without a Content-Length
+    r = client.put("/api/settings", content=chunks(), headers={"content-type": "application/json"})
+    assert r.request.headers.get("transfer-encoding") == "chunked"
+    assert "content-length" not in r.request.headers
+    assert r.status_code == 413 and r.json() == TOO_LARGE
+    assert client.get("/api/settings").json() == before
+    # a small chunked body is read as usual
+    r = client.put(
+        "/api/settings",
+        content=iter([b'{"paused": ', b"true}"]),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200 and r.json()["paused"] is True
+
+
+def test_photo_uploads_are_not_capped_at_1_mb(client: TestClient) -> None:
+    noise = np.random.default_rng(7).integers(0, 256, (1100, 1650, 3), dtype=np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(noise).save(buf, "JPEG", quality=95)
+    data = buf.getvalue()
+    assert len(data) > 1.5 * MAX_BODY_BYTES
+    r = client.post("/api/photos", files={"file": ("noise.jpg", data, "image/jpeg")})
+    assert r.status_code == 201, r.text
+    assert r.json()["width"] == 1650
+
+
+async def _read_whole_body(scope: Scope, receive: Receive, send: Send) -> None:
+    """A bare ASGI app that reads its body to the end and reports its size."""
+    size = 0
+    while True:
+        message = await receive()
+        size += len(message.get("body", b""))
+        if not message.get("more_body"):
+            break
+    await JSONResponse({"read": size})(scope, receive, send)
+
+
+def _call_guard(
+    method: str,
+    headers: dict[str, str],
+    chunks: Sequence[bytes] = (),
+    *,
+    path: str = "/api/settings",
+    client: tuple[str, int] = ("10.0.1.20", 50123),
+    allowed_hosts: frozenset[str] = frozenset(),
+) -> tuple[int, dict[str, Any], int]:
+    """Run the guard over ``_read_whole_body`` once; returns ``(status, JSON
+    body, how many times receive() was called)``."""
+    calls = 0
+
+    async def receive() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls <= len(chunks):
+            return {"type": "http.request", "body": chunks[calls - 1], "more_body": True}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": client,
+    }
+    guard = app_module._RequestGuardMiddleware(_read_whole_body, allowed_hosts=allowed_hosts)
+    asyncio.run(guard(scope, receive, send))
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return sent[0]["status"], json.loads(body), calls
+
+
+def test_a_chunked_body_is_cut_off_at_the_cap_not_read_to_the_end() -> None:
+    lan = {"host": "inkframe.local"}
+    status, body, calls = _call_guard("PUT", lan, [b"x" * 65536] * 64)  # 4 MiB
+    assert status == 413 and body == TOO_LARGE
+    assert calls == MAX_BODY_BYTES // 65536 + 1  # stopped on the first chunk past 1 MiB
+    status, body, _ = _call_guard("PUT", lan, [b"x" * 65536] * 16)  # exactly 1 MiB
+    assert status == 200 and body == {"read": MAX_BODY_BYTES}
+
+
+def test_an_oversized_content_length_is_refused_before_the_body_is_read() -> None:
+    lan = {"host": "inkframe.local"}
+    status, body, calls = _call_guard("PUT", {**lan, "content-length": str(2 * 1024 * 1024)})
+    assert status == 413 and body == TOO_LARGE and calls == 0
+    status, body, calls = _call_guard("PUT", {**lan, "content-length": "lots"})
+    assert status == 400 and body == {"error": "invalid Content-Length"} and calls == 0
+    # the upload route keeps its own (larger) limit
+    upload = {**lan, "content-length": str(2 * 1024 * 1024)}
+    status, body, _ = _call_guard("POST", upload, [b"x" * 65536] * 32, path="/api/photos")
+    assert status == 200 and body == {"read": 2 * 1024 * 1024}
+
+
+# --- request guard: cross-site requests -------------------------------------------------
+
+UNEXPECTED_HOST = {"error": "request refused: unexpected Host"}
+CROSS_SITE = {"error": "request refused: cross-site origin"}
+
+
+@pytest.fixture
+def lan_client(
+    data_dir: Path, mock_display: MockDisplay, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    """``client`` with no ``INKFRAME_ALLOWED_HOSTS`` from the environment."""
+    monkeypatch.delenv("INKFRAME_ALLOWED_HOSTS", raising=False)
+    app = create_app(data_dir=data_dir, display=mock_display, scheduler=False)
+    with TestClient(app) as c:
+        yield c
+
+
+def _paused(c: TestClient) -> bool:
+    return c.get("/api/status").json()["rotation"]["paused"]
+
+
+def test_a_cross_site_post_is_refused(lan_client: TestClient) -> None:
+    r = lan_client.post("/api/display/pause", headers={"origin": "http://evil.example"})
+    assert r.status_code == 403 and r.json() == CROSS_SITE
+    assert not _paused(lan_client)
+    # Origin "null" (sandboxed frames, file: pages) is cross-site too
+    r = lan_client.post("/api/display/pause", headers={"origin": "null"})
+    assert r.status_code == 403 and r.json() == CROSS_SITE
+    # browsers that send Sec-Fetch-Site: cross-site, with or without Origin
+    r = lan_client.post("/api/display/pause", headers={"sec-fetch-site": "cross-site"})
+    assert r.status_code == 403 and r.json() == CROSS_SITE
+    # a multipart upload (a "simple" request no preflight stops) as well
+    r = lan_client.post(
+        "/api/photos",
+        files={"file": ("a.jpg", b"\xff\xd8\xff", "image/jpeg")},
+        headers={"origin": "https://evil.example"},
+    )
+    assert r.status_code == 403 and r.json() == CROSS_SITE
+    assert lan_client.get("/api/photos").json()["count"] == 0
+    r = lan_client.put(
+        "/api/settings", json={"paused": True}, headers={"origin": "http://evil.example"}
+    )
+    assert r.status_code == 403 and not _paused(lan_client)
+
+
+def test_a_same_origin_post_is_accepted(lan_client: TestClient) -> None:
+    r = lan_client.post(
+        "/api/display/pause",
+        headers={"origin": "http://testserver", "sec-fetch-site": "same-origin"},
+    )
+    assert r.status_code == 200 and _paused(lan_client)
+    r = lan_client.post(
+        "/api/display/resume",
+        headers={"host": "Inkframe.local:8080", "origin": "http://inkframe.local:8080"},
+    )
+    assert r.status_code == 200 and not _paused(lan_client)
+    # a request typed or bookmarked by the owner: Sec-Fetch-Site none
+    r = lan_client.post("/api/display/pause", headers={"sec-fetch-site": "none"})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "inkframe.local",
+        "inkframe.local:8080",
+        "INKFRAME.LOCAL.",
+        "10.0.1.238",
+        "10.0.1.238:80",
+        "192.168.1.20",
+        "172.16.4.4",
+        "localhost",
+        "localhost:8080",
+        "127.0.0.1",
+        "[::1]:8080",
+        "[fd12:3456::7]",
+        "169.254.10.1",
+        "[fe80::1]",
+        "inkframe",
+    ],
+)
+def test_lan_hosts_are_accepted(lan_client: TestClient, host: str) -> None:
+    r = lan_client.post("/api/display/pause", headers={"host": host})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example",
+        "evil.example:80",
+        "8.8.8.8",
+        "inkframe.local.evil.example",
+        "localhost.evil.example",
+        "evil.example@localhost",
+        "localhost:http",
+        "[::1",
+    ],
+)
+def test_other_hosts_are_refused(lan_client: TestClient, host: str) -> None:
+    # DNS rebinding: Origin and Host agree, but name a site that is not the frame
+    r = lan_client.post("/api/display/pause", headers={"host": host, "origin": f"http://{host}"})
+    assert r.status_code == 403 and r.json() == UNEXPECTED_HOST
+    assert not _paused(lan_client)
+
+
+def test_origin_must_name_the_host(lan_client: TestClient) -> None:
+    for origin in (
+        "http://10.0.1.238",
+        "http://inkframe.local.evil.example",
+        "ftp://inkframe.local",
+    ):
+        r = lan_client.post(
+            "/api/display/pause", headers={"host": "inkframe.local", "origin": origin}
+        )
+        assert r.status_code == 403 and r.json() == CROSS_SITE, origin
+    assert not _paused(lan_client)
+
+
+def test_get_is_never_blocked(lan_client: TestClient) -> None:
+    hostile = {
+        "host": "evil.example",
+        "origin": "http://evil.example",
+        "sec-fetch-site": "cross-site",
+    }
+    assert lan_client.get("/api/status", headers=hostile).status_code == 200
+    assert lan_client.head("/api/health", headers=hostile).status_code == 200
+    assert lan_client.get("/", headers=hostile).status_code == 200
+    # OPTIONS is not checked either (there is no CORS: nothing answers it)
+    assert lan_client.options("/api/display/pause", headers=hostile).status_code == 405
+
+
+def test_allowed_hosts_env_var_adds_names(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INKFRAME_ALLOWED_HOSTS", " frame.example.com, Photo.Example.org:8080,,")
+    app = create_app(data_dir=data_dir, display=MockDisplay(data_dir), scheduler=False)
+    # read once, by create_app
+    monkeypatch.setenv("INKFRAME_ALLOWED_HOSTS", "other.example.com")
+    with TestClient(app) as c:
+        for host in ("frame.example.com", "frame.example.com:443", "photo.example.org"):
+            assert c.post("/api/display/pause", headers={"host": host}).status_code == 200
+        r = c.post("/api/display/pause", headers={"host": "other.example.com"})
+        assert r.status_code == 403 and r.json() == UNEXPECTED_HOST
+
+
+def test_allowed_hosts_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module.socket, "gethostname", lambda: "Kitchen-Frame")
+    monkeypatch.setenv("INKFRAME_ALLOWED_HOSTS", "2001:db8::1, [2001:DB8:0::2]:80, a.b.")
+    assert allowed_hosts_from_env() == {"kitchen-frame", "2001:db8::1", "2001:db8::2", "a.b"}
+    monkeypatch.delenv("INKFRAME_ALLOWED_HOSTS")
+    assert allowed_hosts_from_env() == {"kitchen-frame"}
+
+
+def test_the_machine_hostname_is_accepted(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INKFRAME_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(app_module.socket, "gethostname", lambda: "Kitchen-Frame")
+    app = create_app(data_dir=data_dir, display=MockDisplay(data_dir), scheduler=False)
+    with TestClient(app) as c:
+        assert c.post("/api/display/pause", headers={"host": "kitchen-frame"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("name", "local"),
+    [
+        ("localhost", True),
+        ("inkframe", True),
+        ("frame.local", True),
+        ("10.1.2.3", True),
+        ("::1", True),
+        ("fe80::1", True),
+        ("::ffff:192.168.0.9", True),
+        ("::ffff:8.8.8.8", False),
+        ("8.8.8.8", False),
+        ("2001:4860::8888", False),
+        ("testserver", False),
+        ("local", False),
+        ("example.com", False),
+    ],
+)
+def test_host_is_local(name: str, local: bool) -> None:
+    assert host_is_local(name) is local
+    assert host_is_local(name, frozenset({name})) is True
+
+
+def test_the_test_client_exemption_is_only_for_the_test_client() -> None:
+    # Host "testserver" is local only for Starlette's TestClient
+    status, body, _ = _call_guard("POST", {"host": "testserver"}, client=("10.0.1.20", 50123))
+    assert status == 403 and body == UNEXPECTED_HOST
+    status, body, _ = _call_guard("POST", {"host": "testserver"}, client=("testclient", 50000))
+    assert status == 200
+    # and never without a Host header at all
+    status, body, _ = _call_guard("POST", {}, client=("testclient", 50000))
+    assert status == 403 and body == UNEXPECTED_HOST

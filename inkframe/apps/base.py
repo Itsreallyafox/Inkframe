@@ -51,6 +51,15 @@ log = logging.getLogger("inkframe.apps")
 FieldType = Literal["text", "textarea", "number", "bool", "select", "list"]
 _FIELD_TYPES: tuple[str, ...] = ("text", "textarea", "number", "bool", "select", "list")
 
+#: longest ``text`` value, in characters (after stripping)
+MAX_TEXT_CHARS = 500
+#: longest ``textarea`` value, in characters
+MAX_TEXTAREA_CHARS = 20_000
+#: most entries in a ``list`` value (blank lines do not count)
+MAX_LIST_ITEMS = 100
+#: longest single ``list`` entry, in characters (after stripping)
+MAX_LIST_ITEM_CHARS = 2000
+
 
 class AppError(RuntimeError):
     """An app could not render (network down with no cache, bad settings...).
@@ -68,12 +77,17 @@ class Field:
 
     ``type`` decides the widget and the validation:
 
-    * ``text`` / ``textarea``: ``str`` (``textarea`` is multi-line)
+    * ``text`` / ``textarea``: ``str`` (``textarea`` is multi-line), at most
+      ``MAX_TEXT_CHARS`` / ``MAX_TEXTAREA_CHARS`` characters
     * ``number``: ``int`` or ``float`` within ``min``..``max`` (``step`` is a UI hint;
       ``step == 1`` means the value is coerced to ``int``)
     * ``bool``: ``True``/``False``
     * ``select``: one of ``options`` (``(value, label)`` pairs)
-    * ``list``: a list of non-empty strings (one per line in the UI), e.g. feed URLs
+    * ``list``: a list of non-empty strings (one per line in the UI), e.g. feed URLs:
+      at most ``MAX_LIST_ITEMS`` of them, each at most ``MAX_LIST_ITEM_CHARS``
+
+    ``to_dict`` exposes the caps to the UI: ``maxlength`` (text, textarea, and
+    per entry for a list) and ``max_items`` (list).
     """
 
     key: str
@@ -113,6 +127,12 @@ class Field:
             d["options"] = [{"value": v, "label": lbl} for v, lbl in self.options]
         if self.type == "number":
             d["min"], d["max"], d["step"] = self.min, self.max, self.step
+        if self.type == "text":
+            d["maxlength"] = MAX_TEXT_CHARS
+        if self.type == "textarea":
+            d["maxlength"] = MAX_TEXTAREA_CHARS
+        if self.type == "list":
+            d["max_items"], d["maxlength"] = MAX_LIST_ITEMS, MAX_LIST_ITEM_CHARS
         return d
 
 
@@ -126,6 +146,9 @@ def coerce_field(f: Field, value: Any, *, check_required: bool = True) -> Any:
         if not isinstance(value, str):
             raise ValueError(f"{where}: expected text, got {type(value).__name__}")
         value = value.strip() if f.type == "text" else value
+        limit = MAX_TEXT_CHARS if f.type == "text" else MAX_TEXTAREA_CHARS
+        if len(value) > limit:
+            raise ValueError(f"{where}: at most {limit} characters, got {len(value)}")
         if check_required and f.required and not value.strip():
             raise ValueError(f"{where}: required")
         return value
@@ -172,8 +195,16 @@ def coerce_field(f: Field, value: Any, *, check_required: bool = True) -> Any:
             if not isinstance(item, str):
                 raise ValueError(f"{where}: expected strings, got {type(item).__name__}")
             item = item.strip()
-            if item:
-                items.append(item)
+            if not item:
+                continue
+            if len(item) > MAX_LIST_ITEM_CHARS:
+                raise ValueError(
+                    f"{where}: entry {len(items) + 1} is {len(item)} characters long; "
+                    f"at most {MAX_LIST_ITEM_CHARS}"
+                )
+            items.append(item)
+            if len(items) > MAX_LIST_ITEMS:
+                raise ValueError(f"{where}: at most {MAX_LIST_ITEMS} entries")
         if check_required and f.required and not items:
             raise ValueError(f"{where}: at least one entry is required")
         return items

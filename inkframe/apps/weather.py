@@ -36,6 +36,7 @@ from typing import Any
 import httpx
 from PIL import Image
 
+from inkframe import USER_AGENT
 from inkframe.apps.base import Field, RenderContext, schema_defaults
 from inkframe.apps.draw import Canvas
 from inkframe.apps.weather_layouts import (
@@ -50,7 +51,6 @@ from inkframe.display.palette import RED, WHITE
 
 log = logging.getLogger("inkframe.apps.weather")
 
-USER_AGENT = "Inkframe/0.1 (+https://github.com/inkframe)"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 #: reuse a cached forecast this long before asking again

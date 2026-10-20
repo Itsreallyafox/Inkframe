@@ -32,7 +32,7 @@ from inkframe.render.cache import (
     encode_png,
     valid_key,
 )
-from inkframe.render.dither import METHOD_IDS, METHODS, dither
+from inkframe.render.dither import METHOD_IDS, METHODS, METHODS_BY_ID, dither
 from inkframe.render.pipeline import (
     FULL_BOX,
     RecipeError,
@@ -282,6 +282,43 @@ def test_effective_recipe_and_palette(database: Database, photo_factory: PhotoFa
     assert resolve_render_palette(RECIPE, tuned) == tuned.measured_palette()
     assert resolve_render_palette({**RECIPE, "palette": "nominal"}, tuned) is NOMINAL
     assert pipeline.key_for(RECIPE, tuned) != pipeline.key_for(RECIPE, settings)
+
+
+def test_use_measured_off_dithers_against_nominal(
+    photo_factory: PhotoFactory, data_paths: DataPaths
+) -> None:
+    """``settings.palette.use_measured`` is the global switch: off, a recipe
+    asking for "measured" dithers against the nominal primaries (the key
+    follows, since it covers the palette dithered against); a "nominal"
+    recipe is unaffected; the PNG is still coloured with the measured one."""
+    on = Settings().merged({"palette": {"measured": {"blue": [1, 2, 3]}}})
+    off = on.merged({"palette": {"use_measured": False}})
+    nominal_recipe = {**RECIPE, "palette": "nominal"}
+    assert RECIPE["palette"] == "measured" and on.palette.use_measured
+    assert resolve_render_palette(RECIPE, on) == on.measured_palette()
+    assert resolve_render_palette(RECIPE, off) is NOMINAL
+    assert resolve_render_palette(nominal_recipe, off) is NOMINAL
+    assert off.render_palette() is NOMINAL  # what the apps dither against agrees
+    assert pipeline.key_for(RECIPE, off) != pipeline.key_for(RECIPE, on)
+    assert pipeline.key_for(nominal_recipe, off) == pipeline.key_for(nominal_recipe, on)
+    assert pipeline.key_for(RECIPE, off) == recipe_key(RECIPE, NOMINAL, on.measured_palette())
+
+    photo = photo_factory()
+    cache = RenderCache(data_paths)
+    fit = pipeline.load_fit(photo, data_paths)
+    measured = cache.render_or_get(photo, None, on)
+    nominal = cache.render_or_get(photo, None, off)
+    assert nominal.recipe == measured.recipe == RECIPE
+    assert not nominal.cached and nominal.key == pipeline.key_for(RECIPE, off) != measured.key
+    assert np.array_equal(nominal.frame, render_frame(fit, RECIPE, NOMINAL))
+    assert not np.array_equal(nominal.frame, measured.frame)
+    data = cache.read_png(photo.id, nominal.key)
+    assert data is not None
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.getpalette()[:18] == on.measured_palette().flat()
+    # the editor's method strip follows the switch too
+    (strip,) = cache.render_methods(photo, RECIPE, off, methods=(METHODS_BY_ID[RECIPE["method"]],))
+    assert strip.method.id == RECIPE["method"] and strip.key == nominal.key and strip.cached
 
 
 def test_unusable_default_method_falls_back_alone(
