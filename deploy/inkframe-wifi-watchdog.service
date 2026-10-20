@@ -1,0 +1,8 @@
+# Installed by install.sh --system; started by inkframe-wifi-watchdog.timer.
+[Unit]
+Description=Inkframe Wi-Fi watchdog (ping the gateway, bounce the radio, reboot as a last resort)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/inkframe/app/deploy/inkframe-wifi-watchdog.sh

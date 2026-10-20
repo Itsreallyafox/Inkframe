@@ -47,7 +47,7 @@ WORK=""
 
 usage() {
   cat <<'EOF'
-Usage: bash install.sh [--bootstrap | --update | --health] [--no-apt]
+Usage: bash install.sh [--bootstrap | --update | --health | --system] [--no-apt]
        bash install.sh --help
 
 Inkframe installer.  Run on the Pi as user inkframe; root steps use sudo -n.
@@ -62,8 +62,12 @@ Modes:
                requirements.txt (wheels only), build libdither.so,
                install/refresh the systemd unit, restart, health check.
   --health     Wait up to 30 s for GET /api/health, then print /api/status.
+  --system     Pi system tweaks from the checkout's deploy/ files: Wi-Fi power
+               saving off (NetworkManager drop-in + the active profile), the
+               Wi-Fi watchdog timer, persistent journald.  Needs general
+               passwordless sudo.  The Wi-Fi link drops for a few seconds.
   (no mode)    Full install / recovery from a checkout: everything --bootstrap
-               does, then everything --update does.
+               does, then --system, then everything --update does.
 
 Options:
   --no-apt     Skip apt-get (faster re-runs).
@@ -346,6 +350,81 @@ install_sudoers() {
   info "installed"
 }
 
+# --system: the Pi tweaks that keep the frame reachable and diagnosable.
+# Idempotent.  Needs general sudo (NetworkManager, journald, other units).
+NM_CONF_SRC=$APP/deploy/99-inkframe-wifi.conf
+NM_CONF_DST=/etc/NetworkManager/conf.d/99-inkframe-wifi.conf
+WATCHDOG_UNITS="inkframe-wifi-watchdog.service inkframe-wifi-watchdog.timer"
+JOURNALD_SRC=$APP/deploy/journald-inkframe.conf
+JOURNALD_DST=/etc/systemd/journald.conf.d/inkframe.conf
+
+# install_if_changed SRC DST MODE: copy with sudo only when the content differs; prints 0/1
+install_if_changed() {
+  local src=$1 dst=$2 mode=$3
+  if sudo -n cmp -s "$src" "$dst" 2>/dev/null; then
+    echo 0
+    return 0
+  fi
+  sudo -n install -D -m "$mode" -o root -g root "$src" "$dst"
+  echo 1
+}
+
+system_tweaks() {
+  step "system tweaks (Wi-Fi power save, Wi-Fi watchdog, persistent journal)"
+  if [ ! -f "$NM_CONF_SRC" ] || [ ! -f "$JOURNALD_SRC" ] || [ ! -f "$APP/deploy/inkframe-wifi-watchdog.sh" ]; then
+    info "deploy/ files not found in $APP (no checkout yet?): run 'bash $APP/install.sh --system' after the first push"
+    return 0
+  fi
+
+  # 1. Wi-Fi power saving off: the drop-in covers future activations, the
+  #    profile change covers the connection in use (2 = disable).
+  local changed conn reapply=0
+  changed=$(install_if_changed "$NM_CONF_SRC" "$NM_CONF_DST" 0644)
+  [ "$changed" = 1 ] && info "installed $NM_CONF_DST"
+  if command -v nmcli >/dev/null 2>&1; then
+    while IFS= read -r conn; do
+      [ -n "$conn" ] || continue
+      if [ "$(sudo -n nmcli -g 802-11-wireless.powersave connection show "$conn" 2>/dev/null)" != "2" ]; then
+        sudo -n nmcli connection modify "$conn" 802-11-wireless.powersave 2
+        info "wifi.powersave=2 set on connection '$conn'"
+        reapply=1
+      else
+        info "connection '$conn' already has wifi.powersave=2"
+      fi
+    done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2 == "802-11-wireless" {print $1}')
+    if [ "$reapply" = 1 ]; then
+      # re-activating the profile applies it now; do it detached a few seconds
+      # from now so an ssh session running this script survives the blip
+      info "re-activating Wi-Fi in 3 s to apply it (the link drops for a few seconds)"
+      sudo -n systemd-run --quiet --unit=inkframe-wifi-reapply --on-active=3 \
+        /bin/bash -c 'for c in $(nmcli -t -f NAME,TYPE connection show --active | awk -F: '"'"'$2 == "802-11-wireless" {print $1}'"'"'); do nmcli connection up "$c"; done' \
+        || warn "could not schedule the Wi-Fi re-activation; it applies at the next reconnect or reboot"
+    fi
+  else
+    warn "nmcli not found; only the drop-in was installed (applies at the next reconnect)"
+  fi
+
+  # 2. the Wi-Fi watchdog timer (the script runs from the checkout)
+  local unit reload=0
+  for unit in $WATCHDOG_UNITS; do
+    changed=$(install_if_changed "$APP/deploy/$unit" "/etc/systemd/system/$unit" 0644)
+    [ "$changed" = 1 ] && reload=1
+  done
+  [ "$reload" = 1 ] && sudo -n /usr/bin/systemctl daemon-reload
+  sudo -n /usr/bin/systemctl enable --now --quiet inkframe-wifi-watchdog.timer
+  info "watchdog timer: $(systemctl is-active inkframe-wifi-watchdog.timer)"
+
+  # 3. persistent journal, bounded
+  changed=$(install_if_changed "$JOURNALD_SRC" "$JOURNALD_DST" 0644)
+  sudo -n mkdir -p /var/log/journal
+  sudo -n systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
+  if [ "$changed" = 1 ] || [ -z "$(ls -A /var/log/journal 2>/dev/null)" ]; then
+    sudo -n /usr/bin/systemctl restart systemd-journald
+    info "journald restarted with Storage=persistent"
+  fi
+  info "journal boots on disk: $(journalctl --list-boots --no-pager 2>/dev/null | wc -l)"
+}
+
 write_marker() {
   step "bootstrap marker $APP_ROOT/.bootstrap-done"
   date -u +%Y-%m-%dT%H:%M:%SZ >"$APP_ROOT/.bootstrap-done"
@@ -488,7 +567,8 @@ summary() {
     info "SPI:       enabled, active after the reboot"
   fi
   if [ "$1" = bootstrap ]; then
-    info "next:      on the desktop run deploy.ps1 (the first git push installs and starts the service)"
+    info "next:      on the desktop run deploy.ps1 (the first git push installs and starts the service),"
+    info "           then: ssh inkframe 'bash /opt/inkframe/app/install.sh --system' (Wi-Fi power save off, watchdog, journal)"
   else
     info "service:   $(systemctl is-active "$SERVICE" || true)"
   fi
@@ -513,6 +593,7 @@ run_full() {
   preflight full
   bootstrap_steps
   ensure_checkout
+  system_tweaks
   update_steps
   summary full
 }
@@ -528,6 +609,13 @@ run_health() {
   health_check
 }
 
+run_system() {
+  preflight full
+  system_tweaks
+  printf '==> done
+'
+}
+
 main() {
   local mode=full mode_given=0 arg
   for arg in "$@"; do
@@ -539,8 +627,8 @@ main() {
       --no-apt)
         NO_APT=1
         ;;
-      --bootstrap | --update | --health)
-        [ "$mode_given" -eq 0 ] || usage_error "give at most one of --bootstrap, --update, --health"
+      --bootstrap | --update | --health | --system)
+        [ "$mode_given" -eq 0 ] || usage_error "give at most one of --bootstrap, --update, --health, --system"
         mode=${arg#--}
         mode_given=1
         ;;
@@ -554,6 +642,7 @@ main() {
     bootstrap) run_bootstrap ;;
     update) run_update ;;
     health) run_health ;;
+    system) run_system ;;
     full) run_full ;;
   esac
 }

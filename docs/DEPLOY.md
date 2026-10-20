@@ -251,3 +251,23 @@ shell scripts and the unit reach the Pi intact; `bootstrap.ps1` refuses to copy
 an `install.sh` that contains CR bytes. A Windows checkout may not keep the
 executable bit, so the scripts are always run as `bash install.sh` and
 `bash deploy/post-receive-main`, never as `./install.sh`.
+
+## Keeping the frame reachable: `install.sh --system`
+
+The Pi Zero 2 W's Wi-Fi chip drops off the network after a while with the
+driver's power saving on (the frame keeps running but cannot be reached).
+`bash /opt/inkframe/app/install.sh --system` (needs general passwordless
+sudo; also part of a full install) installs three things from `deploy/`:
+
+- `99-inkframe-wifi.conf` into `/etc/NetworkManager/conf.d/` and
+  `wifi.powersave=2` (off) on every Wi-Fi profile, then re-activates the
+  connection a few seconds later (the link drops briefly).
+- `inkframe-wifi-watchdog.{service,timer}`: every minute, root pings the
+  default gateway on `wlan0`; after 3 consecutive misses the radio is bounced
+  (`nmcli radio wifi off/on`, again every 3 misses), after 15 the Pi reboots.
+  Tag `inkframe-wifi-watchdog` in the journal.
+- `journald-inkframe.conf` into `/etc/systemd/journald.conf.d/`:
+  `Storage=persistent`, 64 MB cap, one month retention, so the previous
+  boot's log survives a crash (`journalctl --list-boots`, `journalctl -b -1`).
+
+Run it again any time; it only changes what differs.

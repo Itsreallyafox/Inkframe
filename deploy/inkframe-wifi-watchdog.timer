@@ -1,0 +1,11 @@
+# Installed and enabled by install.sh --system.
+[Unit]
+Description=Run the Inkframe Wi-Fi watchdog every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

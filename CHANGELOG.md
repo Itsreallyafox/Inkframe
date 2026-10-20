@@ -4,6 +4,10 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
 
 ## 0.1.0 — Phase 8: final review (2026-10-20)
 
+- `install.sh --system` (also part of a full install): Wi-Fi power saving
+  off (NetworkManager drop-in + profile), a gateway-ping Wi-Fi watchdog timer
+  that bounces the radio and reboots as a last resort, persistent bounded
+  journald. Added after the frame dropped off Wi-Fi in use.
 - Upload hardening: the per-strip tables Pillow builds for a TIFF and a
   JPEG's MPF (APP2) metadata are now charged against the 150 MB ingest
   budget, so small crafted files can no longer allocate hundreds of MB; the

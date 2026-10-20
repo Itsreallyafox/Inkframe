@@ -323,6 +323,8 @@ measured colours) and `last_frame.bin` (the exact 120000 controller bytes).
 
 ## Logs and recovery
 
+If the frame keeps dropping off Wi-Fi, run `ssh inkframe "bash /opt/inkframe/app/install.sh --system"` once: it turns the Wi-Fi chip's power saving off, installs a gateway-ping watchdog that bounces the radio (and reboots after 15 minutes without a gateway) and makes the journal persistent. Details in `docs/DEPLOY.md`.
+
 ```powershell
 ssh inkframe "journalctl -u inkframe -n 100 -f"        # add sudo if it shows nothing
 ssh inkframe "systemctl status inkframe"
