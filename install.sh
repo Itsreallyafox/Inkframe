@@ -422,6 +422,8 @@ system_tweaks() {
     sudo -n /usr/bin/systemctl restart systemd-journald
     info "journald restarted with Storage=persistent"
   fi
+  # the restart alone leaves the runtime journal in /run until a flush
+  sudo -n journalctl --flush 2>/dev/null || true
   info "journal boots on disk: $(journalctl --list-boots --no-pager 2>/dev/null | wc -l)"
 }
 
