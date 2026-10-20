@@ -16,8 +16,8 @@ User=inkframe
 Group=inkframe
 SupplementaryGroups=spi gpio
 WorkingDirectory=/opt/inkframe/app
-# mock until Phase 7 (hardware bring-up) flips this to epd
-Environment=INKFRAME_DISPLAY=mock
+# epd drives the real panel; set to mock to develop without touching it
+Environment=INKFRAME_DISPLAY=epd
 Environment=INKFRAME_DATA=/opt/inkframe/data
 Environment=INKFRAME_HOST=0.0.0.0
 Environment=INKFRAME_PORT=80
