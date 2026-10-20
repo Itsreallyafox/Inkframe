@@ -56,7 +56,7 @@ from inkframe.api import rotation as rotation_api
 from inkframe.api import settings as settings_api
 from inkframe.api import system as system_api
 from inkframe.apps import APP_IDS, load_app
-from inkframe.apps.base import App, FontLibrary
+from inkframe.apps.base import FONTS_DIR, App, FontLibrary
 from inkframe.config import SettingsStore
 from inkframe.db import Database
 from inkframe.display.base import Display
@@ -75,6 +75,7 @@ SCHEDULER_ENV_VAR = "INKFRAME_SCHEDULER"
 #: unit's TimeoutStopSec (150 s) must stay well above it
 SCHEDULER_STOP_TIMEOUT = 100.0
 _NO_CACHE = "no-cache"
+_LONG_CACHE = "public, max-age=31536000"
 
 
 def scheduler_enabled_by_env() -> bool:
@@ -200,6 +201,8 @@ def create_app(
     app.include_router(photos_api.router)
     app.include_router(recipe_api.router)
     app.mount("/static", _RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
+    # the bundled OFL fonts, for the web UI's display headings
+    app.mount("/fonts", _LongCacheStaticFiles(directory=FONTS_DIR), name="fonts")
 
     # HEAD too: FastAPI's @get, unlike a plain Starlette Route, does not add it
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
@@ -222,6 +225,22 @@ class _RevalidatingStaticFiles(StaticFiles):
     ) -> Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
         response.headers["Cache-Control"] = _NO_CACHE
+        return response
+
+
+class _LongCacheStaticFiles(StaticFiles):
+    """``StaticFiles`` for the bundled fonts: they never change in place (a new
+    font would get a new file name), so browsers may keep them for a year."""
+
+    def file_response(
+        self,
+        full_path: PathLike[str] | str,
+        stat_result: stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = _LONG_CACHE
         return response
 
 

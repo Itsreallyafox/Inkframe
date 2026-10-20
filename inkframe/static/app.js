@@ -1,84 +1,125 @@
-// Inkframe placeholder UI: polls /api/status and fills the status card.
-// An ES module with no dependencies; the full interface replaces it later.
+// Inkframe web UI: the shell, a tiny hash router and the connection badge.
+//
+// Each view module exports mount(container, ...params) and returns
+// {destroy, isDirty}; the router calls destroy() before mounting the next
+// view (timers, listeners, polling stop there) and asks isDirty() before
+// leaving a page with unsaved edits.
 
-const POLL_MS = 5000;
-// middle dot and multiplication sign, spelled out to keep this file ASCII
-const DOT = String.fromCharCode(0xb7);
-const TIMES = String.fromCharCode(0xd7);
+import { api, onConnection } from "./js/api.js";
+import { appsView } from "./js/apps.js";
+import { editorView } from "./js/editor.js";
+import { nowView } from "./js/now.js";
+import { photosView } from "./js/photos.js";
+import { rotationView } from "./js/rotation.js";
+import { settingsView } from "./js/settings.js";
+import { confirmDialog, icon } from "./js/ui.js";
 
-const field = (name) => document.querySelector(`[data-field="${name}"]`);
+const ROUTES = [
+  { re: /^\/now$/, tab: "now", page: "now", view: nowView },
+  { re: /^\/photos$/, tab: "photos", page: "photos", view: photosView },
+  { re: /^\/photos\/([0-9a-f]{32})$/, tab: "photos", page: "editor", view: editorView },
+  { re: /^\/rotation$/, tab: "rotation", page: "rotation", view: rotationView },
+  { re: /^\/apps$/, tab: "apps", page: "apps", view: appsView },
+  { re: /^\/settings$/, tab: "settings", page: "settings", view: settingsView },
+];
 
-function setText(name, text) {
-  const el = field(name);
-  if (el) el.textContent = text;
+const main = document.getElementById("view");
+let current = null; // {destroy, isDirty} of the mounted view
+let currentHash = "";
+let leaving = false; // set while a confirmed "discard changes" navigation runs
+
+function pathOf(hash) {
+  return hash.replace(/^#/, "") || "/now";
 }
 
-function formatDuration(totalSeconds) {
-  const s = Math.max(0, Math.floor(totalSeconds));
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  if (d) return `${d}d ${h}h ${m}m`;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
-
-function formatWhen(iso) {
-  if (!iso) return "never";
-  const t = new Date(iso);
-  if (Number.isNaN(t.getTime())) return iso;
-  return t.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
-// uptime ticks locally between polls
-let uptimeBase = null;
-
-function render(status) {
-  const { display, panel, rotation, system } = status;
-  setText("panel", panel.state);
-  field("panel-dot").dataset.state = panel.state;
-  setText("display", `${display.kind} ${DOT} ${display.width}${TIMES}${display.height}`);
-  const source = panel.last_source ? ` ${DOT} ${panel.last_source.label}` : "";
-  setText("last-refresh", formatWhen(panel.last_refresh_at) + source);
-  setText("rotation", rotation.paused ? "paused" : "running");
-  setText("host", system.hostname);
-  setText("version", `Inkframe ${status.version}`);
-  uptimeBase = { seconds: system.uptime_seconds, at: performance.now() };
-  tickUptime();
-}
-
-function tickUptime() {
-  if (!uptimeBase) return;
-  const elapsed = (performance.now() - uptimeBase.at) / 1000;
-  setText("uptime", formatDuration(uptimeBase.seconds + elapsed));
-}
-
-function setConnection(state, text) {
-  const el = field("conn");
-  el.dataset.state = state;
-  el.textContent = text;
-}
-
-async function poll() {
-  try {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    render(await res.json());
-    setConnection("online", "live");
-  } catch (err) {
-    setConnection("offline", "offline");
-    console.warn("status poll failed:", err);
+function setActiveTab(tab) {
+  for (const a of document.querySelectorAll(".nav-list a")) {
+    if (a.dataset.tab === tab) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
   }
 }
 
-async function loop() {
-  if (document.visibilityState === "visible") await poll();
-  setTimeout(loop, POLL_MS);
+function route() {
+  const path = pathOf(location.hash);
+  let match = null;
+  let found = null;
+  for (const r of ROUTES) {
+    match = path.match(r.re);
+    if (match) {
+      found = r;
+      break;
+    }
+  }
+  if (!found) {
+    location.replace("#/now");
+    return;
+  }
+  if (current && current.destroy) {
+    try {
+      current.destroy();
+    } catch (e) {
+      console.error("view cleanup failed", e);
+    }
+  }
+  currentHash = location.hash || "#/now";
+  setActiveTab(found.tab);
+  main.replaceChildren();
+  main.dataset.view = found.tab;
+  main.dataset.page = found.page;
+  window.scrollTo(0, 0);
+  current = found.view(main, ...match.slice(1)) || null;
+  // move focus for screen readers without drawing a ring on the container
+  main.focus({ preventScroll: true });
 }
 
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") poll();
+window.addEventListener("hashchange", async () => {
+  if (!leaving && current && current.isDirty && current.isDirty()) {
+    const target = location.hash;
+    // stay on the page while asking (replaceState fires no hashchange)
+    history.replaceState(null, "", currentHash);
+    const ok = await confirmDialog({
+      title: "Discard your changes?",
+      message: "This page has edits that are not saved yet.",
+      confirm: "Discard",
+      cancel: "Keep editing",
+      danger: true,
+    });
+    if (ok) {
+      leaving = true;
+      location.hash = target;
+    }
+    return;
+  }
+  leaving = false;
+  route();
 });
-setInterval(tickUptime, 1000);
-loop();
+
+window.addEventListener("beforeunload", (e) => {
+  if (current && current.isDirty && current.isDirty()) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+
+// --- shell ------------------------------------------------------------------------------
+
+for (const slot of document.querySelectorAll("[data-icon]")) {
+  slot.replaceWith(icon(slot.dataset.icon, "nav-icon"));
+}
+
+onConnection((online) => {
+  for (const el of document.querySelectorAll("[data-conn]")) {
+    el.dataset.state = online ? "online" : "offline";
+    el.querySelector(".conn-label").textContent = online ? "Online" : "Offline";
+  }
+});
+
+// one quiet status read for the host name in the rail and the connection badge
+api("/api/status", { quiet: true })
+  .then((status) => {
+    const host = document.querySelector("[data-host]");
+    if (host && status && status.system) host.textContent = `${status.system.hostname} · v${status.version}`;
+  })
+  .catch(() => {});
+
+route();

@@ -1,10 +1,14 @@
-"""HTTP API: health, status shape, settings GET/PUT, index page, logs."""
+"""HTTP API: health, status shape, settings GET/PUT, index page, logs,
+restart, the fonts mount."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import sys
+import threading
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +17,7 @@ import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
+from inkframe.api import system as system_api
 from inkframe.app import create_app
 from inkframe.config import SettingsStore
 from inkframe.display import factory
@@ -90,6 +95,7 @@ def test_status_shape(client: TestClient, data_dir: Path) -> None:
         "data_dir",
         "disk_free_bytes",
         "display_env",
+        "storage",
     }
     sysinfo = s["system"]
     assert isinstance(sysinfo["uptime_seconds"], float) and sysinfo["uptime_seconds"] >= 0
@@ -97,6 +103,68 @@ def test_status_shape(client: TestClient, data_dir: Path) -> None:
     assert Path(sysinfo["data_dir"]) == data_dir.resolve()
     assert isinstance(sysinfo["disk_free_bytes"], int) and sysinfo["disk_free_bytes"] > 0
     assert sysinfo["display_env"] == "mock"
+    storage = sysinfo["storage"]
+    assert set(storage) == {"masters_bytes", "renders_bytes", "cache_bytes", "db_bytes"}
+    assert all(isinstance(v, int) and v >= 0 for v in storage.values())
+    assert storage["db_bytes"] > 0  # the database exists from start-up
+
+
+def test_status_storage_walks_the_data_dir(
+    client: TestClient, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(system_api, "STORAGE_TTL_SECONDS", 0.0)
+    (data_dir / "masters" / "ab").mkdir(parents=True)
+    (data_dir / "masters" / "ab" / "x.jpg").write_bytes(b"m" * 1000)
+    (data_dir / "renders" / "cd").mkdir(parents=True)
+    (data_dir / "renders" / "cd" / "k.png").write_bytes(b"r" * 300)
+    (data_dir / "renders" / "cd" / "k.bin").write_bytes(b"r" * 200)
+    (data_dir / "cache" / "weather").mkdir(parents=True, exist_ok=True)
+    (data_dir / "cache" / "weather" / "f.json").write_bytes(b"c" * 70)
+    storage = client.get("/api/status").json()["system"]["storage"]
+    assert storage["masters_bytes"] == 1000
+    assert storage["renders_bytes"] == 500
+    assert storage["cache_bytes"] >= 70  # apps may keep their own small files there
+    db_files = [data_dir / f"inkframe.db{s}" for s in ("", "-wal", "-shm", "-journal")]
+    assert storage["db_bytes"] == sum(p.stat().st_size for p in db_files if p.exists())
+
+
+def test_status_storage_is_cached_between_polls(
+    client: TestClient, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(system_api, "STORAGE_TTL_SECONDS", 3600.0)
+    first = client.get("/api/status").json()["system"]["storage"]
+    (data_dir / "masters" / "big.jpg").write_bytes(b"m" * 5000)
+    assert client.get("/api/status").json()["system"]["storage"] == first
+    monkeypatch.setattr(system_api, "STORAGE_TTL_SECONDS", 0.0)
+    assert client.get("/api/status").json()["system"]["storage"]["masters_bytes"] == (
+        first["masters_bytes"] + 5000
+    )
+
+
+def test_restart_answers_then_signals_itself(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signalled = threading.Event()
+    calls: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+        signalled.set()
+
+    monkeypatch.setattr(system_api, "RESTART_DELAY_SECONDS", 0.05)
+    monkeypatch.setattr(system_api.os, "kill", fake_kill)
+    r = client.post("/api/system/restart")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert signalled.wait(5)
+    assert calls == [(os.getpid(), signal.SIGTERM)]
+    assert client.get("/api/system/restart").status_code == 405
+
+
+def test_fonts_are_served_with_a_long_cache(client: TestClient) -> None:
+    r = client.get("/fonts/playfair-display/PlayfairDisplay-Regular.ttf")
+    assert r.status_code == 200 and len(r.content) > 10_000
+    assert r.headers["cache-control"] == "public, max-age=31536000"
+    assert client.get("/fonts/nope.ttf").status_code == 404
 
 
 def test_status_reflects_display_and_state(client: TestClient, mock_display: MockDisplay) -> None:
