@@ -308,21 +308,27 @@ def gradient_image(width: int = 2400, height: int = 1600) -> Image.Image:
     """A photo stand-in: a hue sweep left to right, dark to light top to bottom,
     a grey ramp along the bottom eighth, and twelve flat patches (the nominal
     and measured palette colours) so every dither method has edges, flats and
-    tones to work on."""
-    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
-    u, v = x / max(1, width - 1), y / max(1, height - 1)
-    rgb = np.stack(
-        [
-            0.5 + 0.5 * np.cos(2 * np.pi * (u - 0.0)),
-            0.5 + 0.5 * np.cos(2 * np.pi * (u - 1 / 3)),
-            0.5 + 0.5 * np.cos(2 * np.pi * (u - 2 / 3)),
-        ],
-        axis=-1,
-    )
-    rgb = rgb * (0.15 + 0.85 * v)[..., None]
-    a = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)
+    tones to work on.  Computed in row chunks so the float temporaries stay
+    small: the Pi (415 MB) cannot afford a whole-frame float32 image."""
+    a = np.empty((height, width, 3), dtype=np.uint8)
+    chunk = 100
+    for r0 in range(0, height, chunk):
+        r1 = min(height, r0 + chunk)
+        y, x = np.mgrid[r0:r1, 0:width].astype(np.float32)
+        u, v = x / max(1, width - 1), y / max(1, height - 1)
+        rgb = np.stack(
+            [
+                0.5 + 0.5 * np.cos(2 * np.pi * (u - 0.0)),
+                0.5 + 0.5 * np.cos(2 * np.pi * (u - 1 / 3)),
+                0.5 + 0.5 * np.cos(2 * np.pi * (u - 2 / 3)),
+            ],
+            axis=-1,
+        )
+        rgb = rgb * (0.15 + 0.85 * v)[..., None]
+        a[r0:r1] = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)
     ramp_top = height - height // 8
-    a[ramp_top:, :, :] = np.rint(u[ramp_top:, :, None] * 255).astype(np.uint8)
+    u_row = (np.arange(width, dtype=np.float32) / max(1, width - 1))[None, :, None]
+    a[ramp_top:, :, :] = np.rint(u_row * 255).astype(np.uint8)
     pw, ph = width // 16, height // 10
     for i, colour in enumerate(NOMINAL_RGB + MEASURED_DEFAULT_RGB):
         x0 = (i % 6) * (width // 6) + pw // 2

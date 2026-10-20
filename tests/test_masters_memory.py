@@ -14,11 +14,13 @@ fallback.  Skipped where neither is available.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import struct
 import subprocess
 import sys
+import tracemalloc
 import zlib
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +29,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from inkframe.paths import DataPaths
+from inkframe.render import masters
 from tests.conftest import encode, jpeg_bytes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -286,3 +290,91 @@ def test_decode_cost_is_an_upper_bound(tmp_path: Path, case: str) -> None:
     status, peak, cost = _measure(tmp_path, ESTIMATED[case](), budget=10**12)
     assert status == "ok" and cost > 0
     assert peak <= cost, f"{case}: peaked at {peak / 1e6:.1f} MB, estimated {cost / 1e6:.1f} MB"
+
+
+# --- EXIF/TIFF IFD tag expansion (folded from the round-3 probe) -----------------------
+#
+# A crafted ~100 KB file whose embedded EXIF/TIFF IFD holds thousands of tags
+# that all point at the same large region makes Pillow materialise
+# ``tag_count x region`` bytes (hundreds of MB) when it parses the IFD: inside
+# ``Image.open`` for JPEG (``_read_dpi_from_exif`` -> ``getexif()``), in our
+# ``_orientation`` for PNG/WEBP, and while the file's own IFD is parsed for
+# TIFF.  ``scan_metadata`` now walks the IFD tree on the raw bytes before
+# ``Image.open`` and refuses it.  Measured peaks on the desktop (budget 20 MB,
+# file size in brackets): before the fix / after it.
+#
+#   JPEG [66 KB]   +356 MB (accepted!) -> +0.3 MB (422, before Image.open)
+#   PNG  [120 KB]  +362 MB (accepted!) -> +0.3 MB (422, before Image.open)
+#   WEBP [120 KB]  +364 MB (accepted!) -> +0.2 MB (422, before Image.open)
+#   TIFF [120 KB]  +364 MB (OOM on Pi) -> +0.2 MB (422, before Image.open)
+
+
+def _overlapping_ifd(n_tags: int, size: int) -> bytes:
+    """A little-endian TIFF/EXIF IFD whose ``n_tags`` UNDEFINED tags all point
+    at the same ``size`` bytes, so ``getexif()`` expands it to ``n_tags * size``
+    bytes in memory from an IFD of only ``12 * n_tags`` bytes plus one copy of
+    the region.  The leading ``II*\\0`` also makes the block a valid bare TIFF
+    file."""
+    entries = [(40000 + i, 7, size, 1) for i in range(n_tags)]  # type 7 = UNDEFINED
+    ifd = (
+        struct.pack("<H", len(entries))
+        + b"".join(struct.pack("<HHII", t, typ, c, v) for t, typ, c, v in entries)
+        + b"\x00\x00\x00\x00"
+    )
+    blob = b"II*\x00" + struct.pack("<I", 8) + ifd
+    return blob + b"\x00" * max(0, size + 1 - len(blob))
+
+
+def _png_with_exif(ifd: bytes) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (200, 10, 10)).save(buf, "PNG")
+    png = buf.getvalue()
+    chunk = (
+        struct.pack(">I", len(ifd)) + b"eXIf" + ifd + struct.pack(">I", zlib.crc32(b"eXIf" + ifd))
+    )
+    return png[:33] + chunk + png[33:]
+
+
+def _jpeg_with_exif(ifd: bytes) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (200, 10, 10)).save(buf, "JPEG")
+    jpeg = buf.getvalue()
+    payload = b"Exif\x00\x00" + ifd
+    return jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + jpeg[2:]
+
+
+def _webp_with_exif(ifd: bytes) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (200, 10, 10)).save(buf, "WEBP", exif=ifd)
+    return buf.getvalue()
+
+
+IFD_BOMBS: dict[str, Callable[[], bytes]] = {
+    "jpeg": lambda: _jpeg_with_exif(_overlapping_ifd(5400, 65_400)),
+    "png": lambda: _png_with_exif(_overlapping_ifd(3000, 120_000)),
+    "webp": lambda: _webp_with_exif(_overlapping_ifd(3000, 120_000)),
+    "tiff": lambda: _overlapping_ifd(3000, 120_000),
+}
+
+
+@pytest.mark.parametrize("fmt", list(IFD_BOMBS))
+def test_exif_tag_expansion_stays_within_budget(tmp_path: Path, fmt: str) -> None:
+    """A ~100 KB upload whose IFD holds thousands of overlapping tags must be
+    refused before Pillow parses the IFD, so the peak stays tiny instead of
+    ballooning to hundreds of MB (an OOM on the 415 MB Pi)."""
+    data = IFD_BOMBS[fmt]()
+    assert len(data) < 200_000
+    budget = 20_000_000
+    paths = DataPaths(tmp_path / f"d-{fmt}").ensure_dirs()
+    tracemalloc.start()
+    try:
+        masters.ingest(data, f"evil.{fmt}", paths=paths, max_decode_bytes=budget)
+    except masters.IngestError:
+        pass  # a 422 refusal is the fix
+    finally:
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+    assert peak < budget * 2, (
+        f"{fmt}: ingest peaked at {peak / 1e6:.0f} MB on a {len(data) / 1e3:.0f} KB file"
+        f" with a {budget / 1e6:.0f} MB budget"
+    )

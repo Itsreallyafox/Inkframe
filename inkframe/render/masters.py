@@ -47,6 +47,7 @@ import io
 import logging
 import math
 import re
+import struct
 import threading
 import unicodedata
 from dataclasses import dataclass
@@ -317,6 +318,21 @@ _PNG_APNG = frozenset({b"acTL", b"fcTL", b"fdAT"})
 _NON_ASCII = re.compile(rb"[\x80-\xff]")
 _GIF_EXTENSION, _GIF_IMAGE, _GIF_TRAILER, _GIF_COMMENT = 0x21, 0x2C, 0x3B, 0xFE
 
+#: size in bytes of each TIFF 6 / EXIF field type (1..13); an unknown type is
+#: treated as one byte, exactly as Pillow's ``load`` ignores it but we must
+#: not under-count.  16/17/18 are BigTIFF's 8-byte LONG8/SLONG8/IFD8.
+_IFD_TYPE_SIZE = {
+    1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4,
+    16: 8, 17: 8, 18: 8,
+}  # fmt: skip
+#: IFD pointer tags whose sub-IFD Pillow can walk and materialise (``getexif``
+#: ``get_ifd`` / ``_get_merged_dict``): Exif, GPS and Interop
+_IFD_SUB_TAGS = frozenset({0x8769, 0x8825, 0xA005})
+#: no legitimate EXIF/TIFF IFD comes near these; a crafted one has thousands
+#: of entries, or a cycle of IFDs, all pointing at the same large region
+_MAX_IFD_ENTRIES = 2000
+_MAX_IFDS = 32
+
 
 @dataclass(frozen=True)
 class Metadata:
@@ -478,6 +494,169 @@ def _scan_gif(data: bytes) -> Metadata:
     return Metadata(retained=joined or 0)
 
 
+def _ifd_materialised_bytes(tiff: bytes) -> int:
+    """Walk the IFD tree of an EXIF/TIFF block (``tiff`` starts at the TIFF
+    header, after any ``Exif\\0\\0`` prefix) and return the bytes
+    ``getexif()`` would materialise from it: Pillow's ``ImageFileDirectory_v2``
+    reads every entry's ``count x type_size`` value into ``_tagdata``, and
+    builds a Python object per value on top, so a single IFD of thousands of
+    entries that all point at the same large region expands to
+    ``entries x region`` bytes in memory from a tiny file.
+
+    Walks IFD0, the next-IFD chain and the sub-IFDs reachable through the
+    Exif (0x8769), GPS (0x8825) and Interop (0xA005) pointer tags, with a
+    visited set (no offset twice), a cap of ``_MAX_IFDS`` IFDs and
+    ``_MAX_IFD_ENTRIES`` entries per IFD.  BigTIFF (magic 43) is handled too.
+
+    Raises ``UndecodableImage`` when an IFD has more than ``_MAX_IFD_ENTRIES``
+    entries or the walk would touch more than ``_MAX_IFDS`` IFDs; no genuine
+    file does, and both are reached long before the memory would be.  A
+    malformed offset (out of range) is not an error: that branch stops.
+    """
+    if tiff[:6] == b"Exif\x00\x00":
+        tiff = tiff[6:]
+    end = len(tiff)
+    order = tiff[:2]
+    if end < 8 or order not in (b"II", b"MM"):
+        return 0
+    endian = "<" if order == b"II" else ">"
+    magic = struct.unpack(endian + "H", tiff[2:4])[0]
+    # ``dir_fmt``: the IFD's entry-count field (2 bytes classic, 8 BigTIFF).
+    # ``head_fmt``/``head_sz``: tag, type and value-count of one entry (the
+    # count is 4 bytes classic, 8 BigTIFF).  ``off_fmt``/``off_sz``: the
+    # value/offset field that follows (4 bytes classic, 8 BigTIFF).
+    if magic == 43:  # BigTIFF
+        dir_sz, dir_fmt, head_sz, head_fmt, off_sz, off_fmt, entry_sz = (
+            8,
+            "Q",
+            12,
+            "HHQ",
+            8,
+            "Q",
+            20,
+        )
+        if end < 16:
+            return 0
+        first = struct.unpack(endian + "Q", tiff[8:16])[0]
+    elif magic == 42:  # classic TIFF
+        dir_sz, dir_fmt, head_sz, head_fmt, off_sz, off_fmt, entry_sz = 2, "H", 8, "HHI", 4, "I", 12
+        first = struct.unpack(endian + "I", tiff[4:8])[0]
+    else:
+        return 0
+
+    total = 0
+    visited: set[int] = set()
+    stack = [first]
+    while stack:
+        off = stack.pop()
+        if off in visited or off < 8 or off + dir_sz > end:
+            continue  # out of range: a malformed branch, stop walking it
+        visited.add(off)
+        if len(visited) > _MAX_IFDS:
+            raise UndecodableImage(
+                "the file's embedded metadata chains through too many IFDs; its EXIF is"
+                " too large to decode safely. Re-save it without the metadata"
+            )
+        count = struct.unpack(endian + dir_fmt, tiff[off : off + dir_sz])[0]
+        if count > _MAX_IFD_ENTRIES:
+            raise UndecodableImage(
+                f"the file has an EXIF/TIFF IFD of {count} tags (more than {_MAX_IFD_ENTRIES});"
+                " its metadata is too large to decode safely. Re-save it without the metadata"
+            )
+        entries = off + dir_sz
+        last = entries + entry_sz * count
+        pos = entries
+        while pos + entry_sz <= end and pos < last:
+            tag, typ, cnt = struct.unpack(endian + head_fmt, tiff[pos : pos + head_sz])
+            total += cnt * _IFD_TYPE_SIZE.get(typ, 1)
+            if tag in _IFD_SUB_TAGS:  # the value field holds a sub-IFD offset
+                sub = struct.unpack(endian + off_fmt, tiff[pos + head_sz : pos + head_sz + off_sz])[
+                    0
+                ]
+                if sub not in visited:
+                    stack.append(sub)
+            pos += entry_sz
+        if last + off_sz <= end:  # the next IFD in the chain (IFD1, the thumbnail)
+            nxt = struct.unpack(endian + off_fmt, tiff[last : last + off_sz])[0]
+            if nxt and nxt not in visited:
+                stack.append(nxt)
+    return total
+
+
+def _jpeg_exif_block(data: bytes) -> bytes:
+    """The EXIF TIFF block Pillow builds from a JPEG's APP1 ``Exif\\0\\0``
+    segments: the first whole, every later one appended without its 6-byte
+    prefix (``self.info["exif"] += s[6:]``), exactly as ``JpegImageFile``
+    concatenates them.  Empty when there is none.  Walks the markers by
+    length (``_scan_jpeg`` has already bounded the step count)."""
+    pos, end = 2, len(data)
+    parts: list[bytes] = []
+    while pos + 4 <= end:
+        if data[pos] != 0xFF:
+            break
+        marker = data[pos + 1]
+        if marker == 0xFF:  # fill byte
+            pos += 1
+            continue
+        if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:  # standalone
+            pos += 2
+            continue
+        if marker == 0xDA or marker == 0xD9:  # SOS (pixels) / EOI: no more headers
+            break
+        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+        seg = data[pos + 4 : pos + 2 + length]
+        if marker == 0xE1 and seg.startswith(b"Exif\x00\x00"):
+            parts.append(seg if not parts else seg[6:])
+        pos += 2 + length
+    return b"".join(parts)
+
+
+def _png_exif_blocks(data: bytes) -> list[bytes]:
+    """The payloads of every PNG ``eXIf`` chunk (the raw EXIF TIFF block
+    Pillow stores in ``info["exif"]``; Pillow keeps the LAST one it meets,
+    including chunks after IDAT read in ``load_end``, so every chunk is
+    charged rather than guessing which one wins).  Walks chunk lengths only."""
+    blocks: list[bytes] = []
+    pos, end = 8, len(data)
+    while pos + 8 <= end:
+        length = int.from_bytes(data[pos : pos + 4], "big")
+        kind = data[pos + 4 : pos + 8]
+        if kind == b"IEND":
+            break
+        if kind == b"eXIf":
+            blocks.append(bytes(data[pos + 8 : min(end, pos + 8 + length)]))
+        pos += 12 + length
+    return blocks
+
+
+def _webp_exif_block(data: bytes) -> bytes:
+    """The payload of a WEBP ``EXIF`` RIFF chunk (what libwebp hands Pillow as
+    ``info["exif"]``), or empty.  Walks chunk sizes only."""
+    end = len(data)
+    if end < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return b""
+    pos = 12
+    while pos + 8 <= end:
+        fourcc = data[pos : pos + 4]
+        size = int.from_bytes(data[pos + 4 : pos + 8], "little")
+        body = pos + 8
+        if fourcc == b"EXIF":
+            return bytes(data[body : min(end, body + size)])
+        pos = body + size + (size & 1)  # chunks are padded to an even size
+    return b""
+
+
+def _with_ifd(meta: Metadata, exif: bytes) -> Metadata:
+    """``meta`` with what ``getexif()`` would materialise from ``exif`` added
+    to its retained bytes: it is allocated inside (JPEG) or right after
+    ``Image.open`` and stays alive on ``im._exif`` until the master is
+    encoded, the same lifetime as the rest of ``retained``."""
+    extra = _ifd_materialised_bytes(exif) if exif else 0
+    if not extra:
+        return meta
+    return Metadata(retained=meta.retained + extra, transient=meta.transient)
+
+
 def scan_metadata(data: bytes, source_format: str) -> Metadata:
     """What Pillow's header parser will keep of ``data`` (sniffed as
     ``source_format``), from the raw bytes, before Pillow parses anything.
@@ -487,13 +666,29 @@ def scan_metadata(data: bytes, source_format: str) -> Metadata:
     that take minutes and hundreds of MB inside ``Image.open``, before any
     budget check could run.  Raises ``UndecodableImage`` when a file would
     take more than ``MAX_HEADER_STEPS`` steps or, for GIF, copy more than
-    ``MAX_GIF_COMMENT_COPY`` bytes of comments.  Other formats are parsed in
-    C (or have fixed-size headers): ``Metadata()``.
+    ``MAX_GIF_COMMENT_COPY`` bytes of comments.
+
+    It also walks any embedded EXIF/TIFF IFD tree (``_ifd_materialised_bytes``)
+    and counts what ``getexif()`` would materialise from it: a ~100 KB file
+    whose IFD holds thousands of tags all pointing at one large region makes
+    Pillow allocate ``tags x region`` bytes (hundreds of MB) when it parses
+    the IFD -- inside ``Image.open`` for JPEG (``_read_dpi_from_exif``), in
+    ``_orientation`` for PNG/WEBP, and while the file's own IFD is parsed for
+    TIFF.  ``decode_cost`` never saw it, because this scan only sized the raw
+    segment/chunk.  Charged as retained bytes, it is refused by the same
+    budget check that runs before ``Image.open`` (``_decode_pillow``).
     """
     if source_format == "jpeg":
-        return _scan_jpeg(data)
+        return _with_ifd(_scan_jpeg(data), _jpeg_exif_block(data))
     if source_format == "png":
-        return _scan_png(data)
+        meta = _scan_png(data)
+        for block in _png_exif_blocks(data):
+            meta = _with_ifd(meta, block)
+        return meta
+    if source_format == "webp":
+        return _with_ifd(Metadata(), _webp_exif_block(data))
+    if source_format == "tiff":
+        return _with_ifd(Metadata(), data)  # the file itself is the TIFF
     if source_format == "gif":
         return _scan_gif(data)
     return Metadata()
@@ -1020,9 +1215,10 @@ def _decode_pillow(
     head = round((meta.retained + meta.transient) * _COST_MARGIN) + len(data)
     if head > max_decode_bytes:
         raise UndecodableImage(
-            f"the file's metadata (text, comments, profiles) needs about {head / 1e6:.0f} MB"
-            f" to read, more than this frame allows ({max_decode_bytes / 1e6:.0f} MB)."
-            " Re-save it without them"
+            f"the file's metadata (text, comments, profiles, EXIF tags) needs about"
+            f" {head / 1e6:.0f} MB to read, more than this frame allows"
+            f" ({max_decode_bytes / 1e6:.0f} MB). It is too large to decode safely;"
+            " re-save it without the metadata"
         )
     try:
         # BytesIO shares ``data`` (bytes) rather than copying it, and so does

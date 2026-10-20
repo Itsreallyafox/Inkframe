@@ -67,6 +67,27 @@ trusted.
      and JPEG APP and COM payloads. Pillow already decodes a PNG's text
      before its pixels while it opens it, so that metadata alone must fit
      the budget before `Image.open` runs.
+   - **EXIF/TIFF IFD tags** (`masters._ifd_materialised_bytes`, also on the
+     raw bytes, before `Image.open`). An embedded IFD whose thousands of tags
+     all point at one large byte region makes Pillow allocate
+     `tag_count x region` bytes (hundreds of MB to GB) when it parses the IFD:
+     for a JPEG inside `Image.open` itself (`_read_dpi_from_exif` →
+     `getexif()`), for PNG and WEBP in `_orientation` (`getexif`), and for
+     TIFF while the file's own IFD is parsed. The header scan above never saw
+     it, because it only sized the raw APP1 segment or eXIf/EXIF chunk. The
+     walker finds the EXIF block (every APP1 `Exif\0\0` for JPEG, the eXIf
+     chunk for PNG, the EXIF chunk for WEBP, the file itself for TIFF), parses
+     the TIFF header (byte order, first IFD offset; classic and BigTIFF), and
+     walks IFD0 → the next-IFD chain and the Exif (0x8769), GPS (0x8825) and
+     Interop (0xA005) sub-IFDs, with a visited set. It sums `count x
+     type_size` (TIFF 6 / EXIF types 1–13; an unknown type counts as one
+     byte) over every entry — what `getexif()` materialises, one object per
+     tag value, and keeps alive on `im._exif` — and charges it as retained
+     bytes, so the same budget check that runs before `Image.open` refuses it
+     (422). A single IFD of more than 2000 entries, or a walk that would touch
+     more than 32 IFDs, is refused outright; no legitimate file comes near
+     either, and both are reached long before the memory would be. A malformed
+     offset (out of range) stops that branch of the walk and is not an error.
    - **Pixels**: `Image.open` parses the headers only, and anything over
      60 MP is refused straight after it. `Image.MAX_IMAGE_PIXELS` is not
      changed: it is process-wide, so another thread opening an image during
@@ -371,6 +392,8 @@ The photo object is `Photo.to_dict()` without `master_path`, plus
 | RLE-compressed BMP | 4 MP | `masters.MAX_RLE_BMP_PIXELS` |
 | header parsing steps (JPEG markers and padding, PNG chunks, GIF blocks) | 50 000 | `masters.MAX_HEADER_STEPS` |
 | GIF comment joining | 256 MB copied (about a 360 KB comment) | `masters.MAX_GIF_COMMENT_COPY` |
+| EXIF/TIFF tag entries per IFD | 2000 | `masters._MAX_IFD_ENTRIES` |
+| EXIF/TIFF IFDs walked | 32 | `masters._MAX_IFDS` |
 | upload body: no data / in all | 30 s / 300 s, then 408 | `api.photos.UPLOAD_IDLE_SECONDS`, `UPLOAD_READ_SECONDS` |
 | ingest memory: estimate plus the upload's bytes | 150 MB | `masters.MAX_DECODE_BYTES` |
 | master | long edge 1800 px, JPEG q92 | `masters.MASTER_LONG_EDGE` |
@@ -465,9 +488,14 @@ Not counted in the estimate:
   that upload is being read, its spooled copy and its bytes coexist for a
   moment, since Trixie's `/tmp` is a tmpfs: 2 x 25 MB at the very worst;
 - the process baseline;
-- a TIFF's tag data (an XMP or ICC tag), which Pillow keeps while the
-  opened image lives; it is bounded by the 25 MB file and is a few KB in
-  real files.
+- a TIFF's or EXIF's **inline** tag data (a large XMP or ICC tag whose bytes
+  live once in the file): Pillow keeps one copy while the opened image lives,
+  a few KB in real files. What is *not* ignored is the IFD's **materialised**
+  size — one object per tag value, `count x type_size` summed over the whole
+  walked IFD tree (`masters._ifd_materialised_bytes`). It is not bounded by
+  the file: thousands of tags that all point at the same region expand to
+  `tag_count x region` bytes from a ~100 KB file, so it is charged as retained
+  bytes (see [Ingest](#stages) step 3) and refused before `Image.open`.
 
 The upload's bytes are counted once, also for compressed TIFFs: libtiff's
 in-memory path decodes from `BytesIO.getvalue()`, and a `BytesIO` made from

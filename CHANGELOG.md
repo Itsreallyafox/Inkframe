@@ -67,6 +67,13 @@ All notable changes to Inkframe. One entry per build phase; dates are UTC.
   (upload, previews, recipe, render bytes pack to 120000) and
   `tests/test_masters_memory.py`, which measures real ingest peaks in a
   fresh interpreter against the budget and the estimates.
+- Hardening after review: an EXIF/TIFF IFD walker charges what Pillow would
+  materialise from embedded metadata (every APP1 Exif segment, every PNG
+  eXIf chunk, the WEBP EXIF chunk, a TIFF's own IFDs) against the decode
+  budget before `Image.open`, with caps of 2000 entries per IFD and 32 IFDs;
+  crafted 100 KB files that previously allocated 350+ MB are refused with 422.
+- Pi pass: 2400x1600 upload 1.7 s, 12-method preview set 2.2 s (cached 0.1 s),
+  service RSS peak 115 MB, scheduler shows the uploaded photo.
 
 ## 0.1.0 — Phase 6: scheduler (2026-10-19)
 

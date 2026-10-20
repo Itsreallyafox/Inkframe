@@ -935,3 +935,166 @@ def test_jpeg_metadata_is_counted() -> None:
     data = jpeg_bytes(Image.new("RGB", (16, 16)), exif=exif.tobytes())
     assert masters.scan_metadata(data, "jpeg").retained >= 2 * 20_000
     assert masters.scan_metadata(jpeg_bytes(Image.new("RGB", (16, 16))), "jpeg").retained < 1_000
+
+
+# --- EXIF/TIFF IFD walker ----------------------------------------------------------------
+
+
+def _ifd(
+    entries: Sequence[tuple[int, int, int, int]], *, first: int = 8, next_off: int = 0
+) -> bytes:
+    """A little-endian classic-TIFF block: a header pointing at one IFD of
+    ``(tag, type, count, value)`` entries.  The walker only sums
+    ``count x type_size`` and never dereferences a value, so the regions the
+    offsets point at need not exist; a little trailing padding keeps any small
+    ``first``/``next`` offset in range."""
+    body = (
+        struct.pack("<H", len(entries))
+        + b"".join(struct.pack("<HHII", t, typ, c, v) for t, typ, c, v in entries)
+        + struct.pack("<I", next_off)
+    )
+    blob = b"II*\x00" + struct.pack("<I", first) + body
+    return blob + b"\x00" * 64
+
+
+def test_ifd_walker_sums_materialised_bytes() -> None:
+    walk = masters._ifd_materialised_bytes
+    # count x type_size per entry: SHORT(2)x2 + LONG(4)x1 + UNDEFINED(1)x10 + RATIONAL(8)x3
+    got = walk(_ifd([(1, 3, 2, 0), (2, 4, 1, 0), (3, 7, 10, 0), (4, 5, 3, 0)]))
+    assert got == 2 * 2 + 1 * 4 + 10 * 1 + 3 * 8
+    # an unknown field type counts as one byte a value, never zero
+    assert walk(_ifd([(9, 999, 50, 0)])) == 50
+    # a big-endian block is read the same way
+    be = b"MM\x00\x2a\x00\x00\x00\x08" + struct.pack(">H", 1) + struct.pack(">HHII", 1, 4, 7, 0)
+    be += struct.pack(">I", 0) + b"\x00" * 64
+    assert walk(be) == 7 * 4
+
+
+def test_ifd_walker_follows_sub_ifds_and_the_next_chain() -> None:
+    walk = masters._ifd_materialised_bytes
+    # IFD0 has an Exif pointer (0x8769) to a sub-IFD, and a next IFD (IFD1)
+    sub_off, ifd1_off = 100, 200
+    ifd0 = b"II*\x00" + struct.pack("<I", 8)
+    ifd0 += struct.pack("<H", 2)
+    ifd0 += struct.pack("<HHII", 0x8769, 4, 1, sub_off)  # Exif IFD pointer: 4 bytes (count 1, LONG)
+    ifd0 += struct.pack("<HHII", 0x010E, 7, 5, 0)  # 5 bytes in IFD0
+    ifd0 += struct.pack("<I", ifd1_off)  # next: IFD1
+    data = bytearray(ifd0 + b"\x00" * 300_000)
+    data[sub_off : sub_off + 2] = struct.pack("<H", 1)
+    data[sub_off + 2 : sub_off + 14] = struct.pack(
+        "<HHII", 0x9286, 7, 70, 0
+    )  # 70 bytes in the Exif IFD
+    data[sub_off + 14 : sub_off + 18] = struct.pack("<I", 0)
+    data[ifd1_off : ifd1_off + 2] = struct.pack("<H", 1)
+    data[ifd1_off + 2 : ifd1_off + 14] = struct.pack(
+        "<HHII", 0x0201, 7, 900, 0
+    )  # 900 bytes in IFD1
+    data[ifd1_off + 14 : ifd1_off + 18] = struct.pack("<I", 0)
+    # every entry's value is materialised, the pointer entry's own 4 bytes included
+    assert walk(bytes(data)) == (4 + 5) + 70 + 900
+
+
+def test_ifd_walker_refuses_too_many_entries() -> None:
+    bomb = _ifd([(40000 + i, 7, 1_000, 1) for i in range(2001)])
+    with pytest.raises(UndecodableImage, match="2000"):
+        masters._ifd_materialised_bytes(bomb)
+    # 2000 is allowed (it is the cap, not past it)
+    assert (
+        masters._ifd_materialised_bytes(_ifd([(40000 + i, 7, 1, 1) for i in range(2000)])) == 2000
+    )
+
+
+def test_ifd_walker_refuses_a_long_ifd_chain() -> None:
+    # 40 empty IFDs chained through the next pointer: past the 32-IFD cap
+    buf = bytearray(b"II*\x00" + struct.pack("<I", 8))
+    offs = [8 + 6 * i for i in range(40)]
+    for i, off in enumerate(offs):
+        nxt = offs[i + 1] if i + 1 < len(offs) else 0
+        while len(buf) < off:
+            buf += b"\x00"
+        buf += struct.pack("<H", 0) + struct.pack("<I", nxt)
+    with pytest.raises(UndecodableImage, match="IFDs"):
+        masters._ifd_materialised_bytes(bytes(buf))
+
+
+def test_ifd_walker_stops_on_malformed_offsets() -> None:
+    walk = masters._ifd_materialised_bytes
+    assert walk(b"II*\x00" + struct.pack("<I", 99_999) + b"\x00" * 32) == 0  # first IFD past EOF
+    assert walk(b"XY*\x00" + b"\x00" * 32) == 0  # not a byte order mark
+    assert walk(b"II") == 0  # too short
+    # a cycle (IFD0.next -> IFD0) is visited once, not forever
+    cyc = _ifd([(1, 7, 3, 0)], next_off=8)
+    assert walk(cyc) == 3
+
+
+def test_block_locators_find_each_format_exif() -> None:
+    ifd = _ifd([(0x0112, 3, 1, 6)])  # a one-tag IFD
+    jpeg = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(jpeg, "JPEG")
+    j = jpeg.getvalue()
+    payload = b"Exif\x00\x00" + ifd
+    with_app1 = j[:2] + b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + j[2:]
+    assert masters._jpeg_exif_block(with_app1).startswith(b"Exif\x00\x00II*\x00")
+    assert masters._jpeg_exif_block(j) == b""  # no EXIF
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(png, "PNG")
+    p = png.getvalue()
+    chunk = (
+        struct.pack(">I", len(ifd)) + b"eXIf" + ifd + struct.pack(">I", zlib.crc32(b"eXIf" + ifd))
+    )
+    assert masters._png_exif_blocks(p[:33] + chunk + p[33:]) == [ifd]
+    assert masters._png_exif_blocks(p) == []
+    # Pillow keeps the LAST eXIf chunk (even one after IDAT): every chunk is charged
+    assert masters._png_exif_blocks(p[:33] + chunk + p[33:-12] + chunk + p[-12:]) == [ifd, ifd]
+
+    webp = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(webp, "WEBP", exif=ifd)
+    assert masters._png_exif_blocks(b"") == []
+    assert masters._webp_exif_block(webp.getvalue()).endswith(ifd[8:])  # header then our one tag
+
+
+# --- real EXIF still ingests and orients (positive) --------------------------------------
+
+
+def test_real_exif_jpeg_still_ingests_and_orients(paths: DataPaths) -> None:
+    # a portrait JPEG with a genuine Pillow EXIF block: orientation 6 turns it
+    # landscape, a handful of other tags come along, and it ingests normally
+    a = np.full((200, 120, 3), 160, np.uint8)
+    a[:40, :30] = (255, 0, 0)  # red in the stored top-left corner
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 CW to display
+    exif[0x010F] = "Inkframe"  # Make
+    exif[0x0110] = "Test Camera"  # Model
+    exif[0x0131] = "pytest"  # Software
+    data = jpeg_bytes(Image.fromarray(a), quality=95, exif=exif.tobytes())
+    assert masters.scan_metadata(data, "jpeg").retained < 5_000  # a real IFD is tiny
+    m = ingest(data, "real.jpg", paths=paths)
+    assert (m.width, m.height) == (200, 120) and m.portrait is False
+    im = _open_master(m)
+    assert "exif" not in im.info  # applied and dropped
+    assert im.getpixel((200 - 15, 15))[0] > 200  # red moved to the top right
+
+
+def test_real_exif_png_still_ingests_and_orients(paths: DataPaths) -> None:
+    a = np.full((200, 120, 3), 160, np.uint8)
+    a[:40, :30] = (255, 0, 0)
+    exif = Image.Exif()
+    exif[0x0112] = 8  # rotate 90 CCW
+    data = encode(Image.fromarray(a), "PNG", exif=exif.tobytes())
+    assert masters._png_exif_blocks(data)  # the eXIf chunk is really there
+    m = ingest(data, "real.png", paths=paths)
+    assert (m.width, m.height) == (200, 120) and m.portrait is False
+    expected = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    assert np.abs(np.asarray(_open_master(m), np.int16) - np.asarray(expected, np.int16)).mean() < 2
+
+
+def test_jpeg_with_a_large_legitimate_icc_segment_still_ingests(paths: DataPaths) -> None:
+    # a 2 MB ICC profile is spread across APP2 markers (not an EXIF IFD): it is
+    # not charged against the IFD walker and ingests under the default budget
+    icc = b"\x00" * 2_000_000
+    data = jpeg_bytes(Image.new("RGB", (64, 64), (10, 120, 200)), icc_profile=icc)
+    assert len(data) > 2_000_000
+    assert masters._jpeg_exif_block(data) == b""  # ICC is APP2, not APP1 Exif
+    m = ingest(data, "wide-gamut.jpg", paths=paths)
+    assert (m.width, m.height) == (64, 64)
