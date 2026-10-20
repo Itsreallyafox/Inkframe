@@ -202,6 +202,18 @@ def test_validate_recipe() -> None:
         validate_recipe({**DEFAULT_RECIPE, "sharpen": float("nan")})
     with pytest.raises(ValueError, match="recipe.palette"):
         validate_recipe({**DEFAULT_RECIPE, "palette": "custom"})
+    # an integer too large for a float is a ValueError naming the field, not
+    # an OverflowError (which PUT /api/settings would answer with a 500)
+    with pytest.raises(ValueError, match="recipe.gamma"):
+        validate_recipe({**DEFAULT_RECIPE, "gamma": 10**400})
+
+
+def test_store_recovers_from_a_huge_number_on_disk(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"default_recipe": {"strength": 1' + "0" * 400 + "}}", encoding="utf-8")
+    store = SettingsStore(path)  # boots with the defaults instead of crashing
+    assert store.get() == Settings()
+    assert (tmp_path / "settings.json.invalid").exists()
 
 
 def test_store_creates_file_with_defaults(tmp_path: Path) -> None:

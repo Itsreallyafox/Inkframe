@@ -146,6 +146,14 @@ def test_settings_put_invalid_is_422(client: TestClient, body: dict, fragment: s
     assert client.get("/api/settings").json() == before
 
 
+def test_settings_put_huge_integer_is_422(client: TestClient) -> None:
+    before = client.get("/api/settings").json()
+    body = '{"default_recipe": {"strength": 1' + "0" * 400 + "}}"  # float() overflows
+    r = client.put("/api/settings", content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 422 and "default_recipe.strength" in r.json()["error"]
+    assert client.get("/api/settings").json() == before
+
+
 def test_settings_put_non_object_is_422(client: TestClient) -> None:
     r = client.put("/api/settings", json=[1, 2, 3])
     assert r.status_code == 422
