@@ -5,7 +5,8 @@ Nothing here draws (``headlines_layouts`` does) and the text clean-up lives in
 
     feeds setting -> parse_feed_lines -> [Feed]
     cache fresh (15 min, same feed list)?  -> entries from cache
-    else fetch every feed in parallel (httpx, overall deadline) -> parse_feed
+    else fetch every feed in parallel (httpx, overall deadline, one retry of a
+         transient failure) -> parse_feed
          all failed -> cached entries regardless of age (stale) -> or nothing
     select(): drop old stories, newest first per feed, interleave or feed
               by feed, drop near-duplicate titles, keep ``count``
@@ -60,6 +61,10 @@ MAX_FEEDS = 8
 MAX_BYTES = 3 * 1024 * 1024
 #: entries kept per feed after parsing
 MAX_PER_FEED = 30
+#: seconds to wait before the one retry of a transient failure
+RETRY_DELAY = 2.0
+#: the pause before a retry (tests replace it so nothing sleeps)
+_sleep = time.sleep
 
 FetchFn = Callable[[str, float], bytes]
 
@@ -239,15 +244,42 @@ def fetch_feed(url: str, timeout: float) -> bytes:
     return b"".join(chunks)
 
 
+def _transient(exc: BaseException) -> bool:
+    """Whether trying again soon may help: connection, read, write and pool errors,
+    httpx timeouts and HTTP 5xx answers.  Not a 4xx, the size cap, our own
+    deadline (``TimeoutError``) or a body that does not parse."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return False
+
+
 def fetch_all(urls: Sequence[str], fetch: FetchFn, timeout: float) -> dict[str, Any]:
     """Fetch ``urls`` in parallel.  Returns ``{url: bytes | Exception}``; never waits
-    much longer than ``timeout`` in total."""
+    much longer than ``timeout`` in total.
+
+    A feed whose first attempt fails transiently (``_transient``) is fetched once
+    more after ``RETRY_DELAY`` seconds, if the deadline still leaves room for it;
+    the retry shares the same overall wait, so it never makes this slower."""
     results: dict[str, Any] = {}
     if not urls:
         return results
+    deadline = time.monotonic() + timeout
+
+    def attempt(url: str) -> bytes:
+        try:
+            return fetch(url, timeout)
+        except Exception as e:
+            if not _transient(e) or deadline - time.monotonic() <= RETRY_DELAY + 1.0:
+                raise
+            log.info("headlines: %s failed: %s; retrying once in %g s", url, e, RETRY_DELAY)
+        _sleep(RETRY_DELAY)
+        return fetch(url, max(0.5, deadline - time.monotonic()))
+
     pool = ThreadPoolExecutor(max_workers=min(len(urls), MAX_FEEDS), thread_name_prefix="feeds")
     try:
-        futures = {pool.submit(fetch, url, timeout): url for url in urls}
+        futures = {pool.submit(attempt, url): url for url in urls}
         done, pending = wait(futures, timeout=timeout + 0.5)
         for fut in done:
             try:

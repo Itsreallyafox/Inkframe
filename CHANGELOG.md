@@ -2,6 +2,18 @@
 
 All notable changes to Inkframe. One entry per build phase; dates are local (America/New_York).
 
+## Unreleased (2026-10-21)
+
+- Weather and Headlines retry a transient failure (a connection error or an
+  HTTP 5xx) once after 2 s, inside the same time budget; a 4xx, a body that is
+  not JSON or a feed that does not parse is not retried. Added after Open-Meteo
+  answered the first refresh after quiet hours with a 503.
+- The weather stamp on a cached forecast now says "COULDN'T UPDATE, DATA FROM
+  ..." whenever a refresh was tried and failed, a lost Wi-Fi connection
+  included. "OFFLINE, DATA FROM ..." is kept for offline mode
+  (`INKFRAME_OFFLINE=1`, renders not allowed to use the network), which the
+  deployed frame never runs in, so the frame itself no longer shows it.
+
 ## 0.1.0 — Phase 8: final review (2026-10-20)
 
 - `install.sh --system` (also part of a full install): Wi-Fi power saving

@@ -213,13 +213,15 @@ so the letterbox bars are exact palette white whatever the recipe.
 Each app renders one 600 x 400 card in the six palette colours directly (flat
 fills, thresholded type, no gradients), except Photos, which returns the
 cached dithered render. All have layout variants, cache what they fetch, and
-degrade to a cached or "offline" card.
+degrade to a cached or "offline" card. Weather and Headlines retry a transient
+failure (a connection error or an HTTP 5xx) once after 2 s, inside the same
+time budget.
 
 | App | What | Settings |
 |---|---|---|
 | Photos | Your uploaded photos, with their recipes. A "No photos yet" card when there are none. | Per slot: `dwell_minutes` (default 3), `order` (`shuffle` default, or `sequential`). Shuffle avoids the last `min(n - 1, 20)` photos. |
-| Weather | Open-Meteo: now, next hours, five days; three layouts. Forecast cached 15 min, geocoding cached forever. | `location` (place name or `lat,lon`; required), `units` (`metric`/`imperial`; imperial also uses a 12-hour clock), `layout` (`rotate` = a different one each hour, `now`, `days`, `poster`), `label`. |
-| Headlines | RSS/Atom top stories set like a front page; three layouts. Feeds fetched in parallel (9.5 s cap), cached 15 min; stale data is shown with a red "offline" note. | `feeds` (one URL per line, optional short name before it; default BBC, NYT, Guardian), `count` (3-8), `max_age_hours` (1-72), `mix` (`interleave`/`by_feed`). |
+| Weather | Open-Meteo: now, next hours, five days; three layouts. Forecast cached 15 min, geocoding cached forever. A transient failure (connection error or 5xx) is retried once after 2 s within the same time budget; if the refresh still fails for any reason, a lost Wi-Fi connection included, the last forecast is shown with a red "couldn't update" stamp; the red "offline" stamp appears only when network use is switched off (`INKFRAME_OFFLINE=1`). | `location` (place name or `lat,lon`; required), `units` (`metric`/`imperial`; imperial also uses a 12-hour clock), `layout` (`rotate` = a different one each hour, `now`, `days`, `poster`), `label`. |
+| Headlines | RSS/Atom top stories set like a front page; three layouts. Feeds fetched in parallel (9.5 s cap), cached 15 min; a transient failure (connection error or 5xx) is retried once after 2 s within the same cap; stale data is shown with a red "offline" note. | `feeds` (one URL per line, optional short name before it; default BBC, NYT, Guardian), `count` (3-8), `max_age_hours` (1-72), `mix` (`interleave`/`by_feed`). |
 | Patterns | Generative prints: Truchet, Bauhaus, halftone, flow field, concentric, plus the palette test card. No network. | `family` (`random`, the five, or `test_card`), `density` (1-5), `palette_mood` (`full`, `duotone`, `warm`, `cool`), `caption`. |
 | Quotes | One quotation per refresh, three layouts. 311 bundled public-domain quotes work offline; optional ZenQuotes (`https://zenquotes.io/api/random`) with the attribution their terms require, falling back to the bundled set. | `source` (`local`/`zenquotes`), `tags` (wisdom, nature, courage, humour, love, work, time, art, science, stoic), `length` (`short`/`any`/`long`), `show_source`. |
 

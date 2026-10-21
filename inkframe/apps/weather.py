@@ -8,9 +8,14 @@ Data flow (plan section 8):
 2. The forecast is cached in ``cache_dir/forecast.json`` keyed by
    ``lat,lon,units`` with a ``fetched_at`` stamp.  A cache younger than
    ``CACHE_WINDOW`` is used without touching the network.
-3. If a refresh fails (or ``ctx.online`` is False), any cached forecast is
-   shown regardless of age with a red "offline, data from 13:50" line; with
-   no cache at all the app renders a designed offline card.
+3. A transient failure (connection error, timeout or HTTP 5xx) is retried
+   once after ``RETRY_DELAY`` if the time budget leaves room.  If the refresh
+   still fails, for any reason (a lost Wi-Fi connection included), any cached
+   forecast is shown regardless of age with a red "couldn't update, data from
+   13:50" line.  Only in offline mode (``ctx.online`` False, which means
+   ``INKFRAME_OFFLINE=1``) is nothing fetched and the cache shown with a red
+   "offline, data from 13:50" line.  With no cache at all the app renders a
+   designed offline card.
 
 The app never raises for network trouble or missing settings: every state
 has a card.  ``fetch_json`` is the only function that touches the network,
@@ -59,6 +64,10 @@ GEOCODE_FILE = "geocode.json"
 FORECAST_FILE = "forecast.json"
 #: forecasts kept in forecast.json (one per location/units the user tried)
 MAX_FORECASTS = 4
+#: seconds to wait before the one retry of a transient failure
+RETRY_DELAY = 2.0
+#: the pause before a retry (tests replace it so nothing sleeps)
+_sleep = time.sleep
 
 CURRENT_VARS = (
     "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day"
@@ -117,7 +126,15 @@ SETTINGS_SCHEMA: tuple[Field, ...] = (
 
 
 class FetchError(Exception):
-    """The network, the HTTP status or the response body let us down."""
+    """The network, the HTTP status or the response body let us down.
+
+    ``transient`` says whether trying again soon may help: True for a connection
+    error, a timeout or an HTTP 5xx; False for a 4xx, any other request error (a
+    redirect loop, a bad URL), a body that is not JSON or no time left."""
+
+    def __init__(self, *args: object, transient: bool = True) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 # --- network ----------------------------------------------------------------------------
@@ -135,17 +152,35 @@ def fetch_json(url: str, params: dict[str, Any], timeout: float) -> Any:
             follow_redirects=True,
         )
     except (httpx.HTTPError, httpx.InvalidURL, OSError) as e:
-        raise FetchError(f"{type(e).__name__}: {e}") from None
+        raise FetchError(
+            f"{type(e).__name__}: {e}", transient=isinstance(e, (httpx.TransportError, OSError))
+        ) from None
     try:
         body = r.json()
     except ValueError:
         body = None
     if r.status_code != 200:
         reason = body.get("reason") if isinstance(body, dict) else None
-        raise FetchError(f"HTTP {r.status_code}" + (f": {reason}" if reason else ""))
+        raise FetchError(
+            f"HTTP {r.status_code}" + (f": {reason}" if reason else ""),
+            transient=r.status_code >= 500,
+        )
     if body is None:
-        raise FetchError("response is not JSON")
+        raise FetchError("response is not JSON", transient=False)
     return body
+
+
+def _fetch(url: str, params: dict[str, Any], ctx: RenderContext, deadline: float) -> Any:
+    """``fetch_json`` with at most one retry: a transient ``FetchError`` is tried once
+    more after ``RETRY_DELAY`` seconds if ``deadline`` still leaves room for it."""
+    try:
+        return fetch_json(url, params, _budget(ctx, deadline))
+    except FetchError as e:
+        if not e.transient or deadline - time.monotonic() <= RETRY_DELAY + 1.0:
+            raise
+        log.info("weather: %s failed: %s; retrying once in %g s", url, e, RETRY_DELAY)
+    _sleep(RETRY_DELAY)
+    return fetch_json(url, params, _budget(ctx, deadline))
 
 
 # --- cache files -------------------------------------------------------------------------
@@ -236,10 +271,11 @@ def geocode(name: str, ctx: RenderContext, deadline: float) -> Place | None:
     if "," in name:  # "Austin, TX": retry the bare name if the qualified one finds nothing
         queries.append(name.split(",", 1)[0].strip())
     for q in queries:
-        body = fetch_json(
+        body = _fetch(
             GEOCODE_URL,
             {"name": q, "count": 1, "language": "en", "format": "json"},
-            _budget(ctx, deadline),
+            ctx,
+            deadline,
         )
         results = body.get("results") if isinstance(body, dict) else None
         if results:
@@ -259,7 +295,7 @@ def geocode(name: str, ctx: RenderContext, deadline: float) -> Place | None:
 def _budget(ctx: RenderContext, deadline: float) -> float:
     left = deadline - time.monotonic()
     if left < 0.5:
-        raise FetchError("out of time")
+        raise FetchError("out of time", transient=False)
     return max(0.5, min(float(ctx.http_timeout), left))
 
 
@@ -369,10 +405,11 @@ def load_weather(ctx: RenderContext, settings: dict[str, Any]) -> Outcome:
         try:
             if not ctx.online:
                 raise FetchError("offline")
-            body = fetch_json(
+            body = _fetch(
                 FORECAST_URL,
                 forecast_params(place.latitude, place.longitude, units),
-                _budget(ctx, deadline),
+                ctx,
+                deadline,
             )
             data = _check_forecast(body)
             fetched_at = now_utc
@@ -392,6 +429,7 @@ def load_weather(ctx: RenderContext, settings: dict[str, Any]) -> Outcome:
         log.warning("weather: unusable forecast data: %s", e)
         return Outcome("offline", query=query, place=place, detail=str(e))
     weather.offline = offline
+    weather.frame_online = ctx.online
     return Outcome("ok", weather=weather, query=query, place=place, detail=detail)
 
 

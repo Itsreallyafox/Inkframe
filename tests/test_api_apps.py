@@ -258,6 +258,7 @@ def test_offline_env_var_reaches_the_apps(client: TestClient, monkeypatch) -> No
         raise weather.FetchError("test: no network")
 
     monkeypatch.setattr(weather, "fetch_json", no_network)
+    monkeypatch.setattr(weather, "_sleep", lambda seconds: None)  # no real pause before a retry
     client.put("/api/apps/weather/settings", json={"location": "Berlin"})
     _png(client.get("/api/apps/weather/preview.png"))
     assert calls == []  # INKFRAME_OFFLINE=1: the app was told not to try

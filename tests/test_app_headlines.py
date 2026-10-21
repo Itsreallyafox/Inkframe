@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,14 +39,20 @@ DEFAULTS = validate_settings(headlines.SETTINGS_SCHEMA, {})
 
 
 class Feeds:
-    """A stand-in for ``fetch_feed``: serves fixtures, counts calls, can fail."""
+    """A stand-in for ``fetch_feed``: serves fixtures, counts calls, can fail.
+
+    ``down`` feeds fail on every call; ``errors[url]`` are raised by that feed's
+    next calls, in order, before normal service."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.down: set[str] = set()
+        self.errors: dict[str, list[Exception]] = {}
 
     def __call__(self, url: str, timeout: float) -> bytes:
         self.calls.append(url)
+        if self.errors.get(url):
+            raise self.errors[url].pop(0)
         if url in self.down or "*" in self.down:
             raise httpx.ConnectError("network is down")
         return (FIX / BODIES[url]).read_bytes()
@@ -59,6 +66,39 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"test tried to fetch {url}")
 
     monkeypatch.setattr(headlines, "fetch_feed", refuse)
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replaces the pause before a retry: no test sleeps, and a test that asks for
+    this fixture sees the delays the fetcher wanted."""
+    delays: list[float] = []
+    monkeypatch.setattr(data, "_sleep", delays.append)
+    return delays
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> list[float]:
+    """A frozen monotonic clock for the fetcher, ``clock[0]`` seconds.  Only the
+    retry pause moves it on (by the delay it asked for, still recorded in
+    ``sleeps``), and a fake fetch may set it to stand for time it used.  The
+    thread pool's own ``wait`` keeps the real clock."""
+    now = [1000.0]
+    monkeypatch.setattr(data, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+
+    def pause(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(data, "_sleep", pause)
+    return now
+
+
+def status_error(url: str, status: int) -> httpx.HTTPStatusError:
+    """What ``raise_for_status`` raises for ``status``."""
+    request = httpx.Request("GET", url)
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
 
 
 @pytest.fixture
@@ -379,6 +419,117 @@ def test_fetch_all_has_an_overall_deadline() -> None:
     results = data.fetch_all(["https://a.example", "https://b.example"], slow, 0.2)
     assert time.monotonic() - t < 1.2
     assert all(isinstance(v, TimeoutError) for v in results.values())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("connection reset"),
+        httpx.ReadTimeout("timed out"),
+        status_error(NYT, 503),
+    ],
+    ids=["connect", "read-timeout", "503"],
+)
+def test_a_transient_failure_is_retried_once(
+    tmp_path: Path, feeds: Feeds, sleeps: list[float], error: Exception
+) -> None:
+    feeds.errors[NYT] = [error]
+    state = state_of(tmp_path)
+    assert not state.stale and state.failed == []
+    assert feeds.calls.count(NYT) == 2
+    assert feeds.calls.count(BBC) == feeds.calls.count(GUARDIAN) == 1
+    assert sleeps == [data.RETRY_DELAY]
+    assert "NYT" in {e.source for e in state.entries}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [status_error(NYT, 404), ValueError("feed larger than 3072 KB"), TimeoutError("deadline")],
+    ids=["404", "size-cap", "deadline"],
+)
+def test_a_permanent_failure_is_not_retried(
+    tmp_path: Path, feeds: Feeds, sleeps: list[float], error: Exception
+) -> None:
+    feeds.errors[NYT] = [error]
+    state = state_of(tmp_path)
+    assert state.failed == [NYT] and not state.stale
+    assert feeds.calls.count(NYT) == 1 and sleeps == []
+
+
+def test_a_feed_that_fails_twice_is_retried_only_once(
+    tmp_path: Path, feeds: Feeds, sleeps: list[float]
+) -> None:
+    feeds.down.add(NYT)
+    state = state_of(tmp_path)
+    assert state.failed == [NYT]
+    assert feeds.calls.count(NYT) == 2 and sleeps == [data.RETRY_DELAY]
+
+
+def test_no_retry_when_the_deadline_has_no_room(sleeps: list[float]) -> None:
+    calls: list[float] = []
+
+    def down(url: str, timeout: float) -> bytes:
+        calls.append(timeout)
+        raise httpx.ConnectError("network is down")
+
+    results = data.fetch_all(["https://a.example"], down, data.RETRY_DELAY + 0.5)
+    assert isinstance(results["https://a.example"], httpx.ConnectError)
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_the_retry_gets_what_is_left_of_the_deadline(
+    sleeps: list[float], clock: list[float]
+) -> None:
+    calls: list[float] = []
+
+    def flaky(url: str, timeout: float) -> bytes:
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise status_error(url, 502)
+        return b"<rss/>"
+
+    assert data.fetch_all(["https://a.example"], flaky, 5.0) == {"https://a.example": b"<rss/>"}
+    assert calls == [5.0, pytest.approx(5.0 - data.RETRY_DELAY)]
+    assert sleeps == [data.RETRY_DELAY]
+
+
+@pytest.mark.parametrize(("left", "retried"), [(3.0, False), (3.05, True)])
+def test_a_retry_needs_more_than_the_delay_plus_a_second(
+    sleeps: list[float], clock: list[float], left: float, retried: bool
+) -> None:
+    """The first attempt uses all but ``left`` seconds of the deadline: the retry
+    happens only if more than ``RETRY_DELAY + 1`` s are left."""
+    assert data.RETRY_DELAY + 1.0 == 3.0
+    deadline = clock[0] + 5.0
+    calls: list[float] = []
+
+    def slow_then_ok(url: str, timeout: float) -> bytes:
+        calls.append(timeout)
+        if len(calls) == 1:
+            clock[0] = deadline - left
+            raise status_error(url, 503)
+        return b"<rss/>"
+
+    results = data.fetch_all(["https://a.example"], slow_then_ok, 5.0)
+    if retried:
+        assert results == {"https://a.example": b"<rss/>"}
+        assert calls == [5.0, pytest.approx(left - data.RETRY_DELAY)]
+        assert sleeps == [data.RETRY_DELAY]
+    else:
+        assert isinstance(results["https://a.example"], httpx.HTTPStatusError)
+        assert calls == [5.0] and sleeps == []
+
+
+def test_transient_classification() -> None:
+    url = "https://a.example"
+    assert data._transient(httpx.ConnectError("refused"))
+    assert data._transient(httpx.ConnectTimeout("slow"))
+    assert data._transient(httpx.RemoteProtocolError("peer closed"))
+    assert data._transient(status_error(url, 500)) and data._transient(status_error(url, 503))
+    assert not data._transient(status_error(url, 404))
+    assert not data._transient(status_error(url, 429))
+    assert not data._transient(ValueError("feed larger than 3072 KB"))
+    assert not data._transient(TimeoutError("feed download exceeded its deadline"))
 
 
 # --- rendering ----------------------------------------------------------------------------------

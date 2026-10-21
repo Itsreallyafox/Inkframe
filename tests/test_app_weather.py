@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ import httpx
 import numpy as np
 import pytest
 
-from inkframe.apps import load_app, weather
+from inkframe.apps import load_app, weather, weather_layouts
 from inkframe.apps.base import (
     App,
     FontLibrary,
@@ -30,7 +31,7 @@ from inkframe.apps.base import (
 )
 from inkframe.apps.draw import Canvas
 from inkframe.apps.weather_glyphs import KINDS, draw_glyph, glyph_for
-from inkframe.apps.weather_layouts import Style, meta_line
+from inkframe.apps.weather_layouts import M, Style, W, meta_line
 from inkframe.apps.weather_model import (
     Place,
     band_for,
@@ -88,24 +89,64 @@ def _no_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx.Client, "send", boom)
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replaces the pause before a retry: no test sleeps, and a test that asks for
+    this fixture sees the delays the app wanted."""
+    delays: list[float] = []
+    monkeypatch.setattr(weather, "_sleep", delays.append)
+    return delays
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> list[float]:
+    """A frozen monotonic clock for the app, ``clock[0]`` seconds.  Only the retry
+    pause moves it on (by the delay it asked for, still recorded in ``sleeps``), and
+    a test may set it to stand for time a fake fetch used, so budgets are exact."""
+    now = [1000.0]
+    monkeypatch.setattr(weather, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+
+    def pause(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(weather, "_sleep", pause)
+    return now
+
+
+def overloaded() -> weather.FetchError:
+    """What ``fetch_json`` raises for Open-Meteo's 503 (transient)."""
+    return weather.FetchError("HTTP 503: The service is overloaded", transient=True)
+
+
 class FakeNet:
-    """Stands in for ``weather.fetch_json``: serves fixtures, records calls."""
+    """Stands in for ``weather.fetch_json``: serves fixtures, records calls.
+
+    ``fail=True`` fails every call for good (a non-transient error, never retried);
+    ``fail=<FetchError>`` raises that on every call; ``errors`` are raised by the
+    first calls, in order, before normal service."""
 
     def __init__(
         self,
         forecast: Any = None,
         geocode: dict[str, Any] | None = None,
-        fail: bool = False,
+        fail: bool | weather.FetchError = False,
+        errors: tuple[weather.FetchError, ...] = (),
     ) -> None:
         self.forecast = forecast
         self.geocode = geocode or {}
         self.fail = fail
+        self.errors = list(errors)
         self.calls: list[tuple[str, dict[str, Any], float]] = []
 
     def __call__(self, url: str, params: dict[str, Any], timeout: float) -> Any:
         self.calls.append((url, dict(params), timeout))
+        if self.errors:
+            raise self.errors.pop(0)
+        if isinstance(self.fail, weather.FetchError):
+            raise self.fail
         if self.fail:
-            raise weather.FetchError("ConnectError: no route to host")
+            raise weather.FetchError("HTTP 404: Not Found", transient=False)
         if url == weather.GEOCODE_URL:
             return self.geocode.get(params["name"], {"generationtime_ms": 0.1})
         assert url == weather.FORECAST_URL
@@ -115,9 +156,13 @@ class FakeNet:
         return [u for u, _, _ in self.calls]
 
 
-def city_net(city: str) -> FakeNet:
+def city_net(city: str, errors: tuple[weather.FetchError, ...] = ()) -> FakeNet:
     c = CITIES[city]
-    return FakeNet(forecast=fixture(c["forecast"]), geocode={c["location"]: fixture(c["geocode"])})
+    return FakeNet(
+        forecast=fixture(c["forecast"]),
+        geocode={c["location"]: fixture(c["geocode"])},
+        errors=errors,
+    )
 
 
 def make_ctx(
@@ -337,10 +382,135 @@ def test_stale_cache_is_shown_when_the_refresh_fails(
     assert net.urls() == [weather.FORECAST_URL]  # it did try
     assert o.state == "ok" and o.weather.offline
     text, fill = meta_line(o.weather, ctx.now, Style(FONTS))
-    assert (text, fill) == ("OFFLINE, DATA FROM 18:15", RED)  # Berlin time
+    assert (text, fill) == ("COULDN'T UPDATE, DATA FROM 18:15", RED)  # Berlin time
     for v in range(3):
         frame = frame_of(make_ctx(tmp_path, online=True, variant=v))
         assert (frame == RED).sum() > 100  # the red offline line
+
+
+def test_a_transient_failure_is_retried_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float], clock: list[float]
+) -> None:
+    seed_cache(tmp_path, "berlin", NOW - timedelta(hours=3))
+    net = city_net("berlin", errors=(overloaded(),))
+    monkeypatch.setattr(weather, "fetch_json", net)
+    ctx = make_ctx(tmp_path, online=True)
+    assert ctx.http_timeout == 10.0
+    o = outcome(ctx)
+    assert net.urls() == [weather.FORECAST_URL, weather.FORECAST_URL]
+    assert sleeps == [weather.RETRY_DELAY]
+    # the first attempt gets the whole budget, the retry what is left after the pause
+    assert net.calls[0][2] == 10.0
+    assert net.calls[1][2] == pytest.approx(10.0 - weather.RETRY_DELAY)
+    assert o.state == "ok" and not o.weather.offline and o.detail == ""
+    entry = json.loads((tmp_path / "forecast.json").read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(entry["52.5244,13.4105,metric"]["fetched_at"]) == NOW
+
+
+def test_a_permanent_failure_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    seed_cache(tmp_path, "berlin", NOW - timedelta(hours=3))
+    net = FakeNet(fail=weather.FetchError("HTTP 400: Invalid parameter", transient=False))
+    monkeypatch.setattr(weather, "fetch_json", net)
+    o = outcome(make_ctx(tmp_path, online=True))
+    assert net.urls() == [weather.FORECAST_URL] and sleeps == []
+    assert o.state == "ok" and o.weather.offline and o.detail == "HTTP 400: Invalid parameter"
+
+
+def test_no_retry_when_the_budget_has_no_room(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    seed_cache(tmp_path, "berlin", NOW - timedelta(hours=3))
+    net = FakeNet(fail=overloaded())
+    monkeypatch.setattr(weather, "fetch_json", net)
+    ctx = make_ctx(tmp_path, online=True)
+    ctx.http_timeout = weather.RETRY_DELAY + 0.5  # less than the delay plus a second left
+    o = outcome(ctx)
+    assert net.urls() == [weather.FORECAST_URL] and sleeps == []
+    assert o.state == "ok" and o.weather.offline
+
+
+@pytest.mark.parametrize(("left", "retried"), [(3.0, False), (3.05, True)])
+def test_a_retry_needs_more_than_the_delay_plus_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+    sleeps: list[float],
+    clock: list[float],
+    left: float,
+    retried: bool,
+) -> None:
+    """The first attempt uses all but ``left`` seconds of the budget: the retry
+    happens only if more than ``RETRY_DELAY + 1`` s are left."""
+    assert weather.RETRY_DELAY + 1.0 == 3.0
+    deadline = clock[0] + 10.0
+    calls: list[float] = []
+
+    def slow_then_ok(url: str, params: dict[str, Any], timeout: float) -> Any:
+        calls.append(timeout)
+        if len(calls) == 1:
+            clock[0] = deadline - left
+            raise overloaded()
+        return {"ok": True}
+
+    monkeypatch.setattr(weather, "fetch_json", slow_then_ok)
+    ctx = RenderContext(settings={}, now=NOW, cache_dir=Path("."), fonts=FONTS)
+    if retried:
+        assert weather._fetch(weather.FORECAST_URL, {}, ctx, deadline) == {"ok": True}
+        assert calls == [10.0, pytest.approx(left - weather.RETRY_DELAY)]
+        assert sleeps == [weather.RETRY_DELAY]
+    else:
+        with pytest.raises(weather.FetchError, match="HTTP 503"):
+            weather._fetch(weather.FORECAST_URL, {}, ctx, deadline)
+        assert calls == [10.0] and sleeps == []
+
+
+def test_a_failed_retry_shows_the_cache_as_couldnt_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    seed_cache(tmp_path, "berlin", NOW - timedelta(hours=3))
+    net = FakeNet(fail=overloaded())
+    monkeypatch.setattr(weather, "fetch_json", net)
+    ctx = make_ctx(tmp_path, online=True, variant=0)
+    o = outcome(ctx)
+    assert net.urls() == [weather.FORECAST_URL] * 2  # one retry, never more
+    assert sleeps == [weather.RETRY_DELAY]
+    assert o.state == "ok" and o.weather.offline and o.weather.frame_online
+    assert o.detail == "HTTP 503: The service is overloaded"
+    text, fill = meta_line(o.weather, ctx.now, Style(FONTS))
+    assert (text, fill) == ("COULDN'T UPDATE, DATA FROM 18:15", RED)  # Berlin time
+
+    # every layout, through the app, draws exactly that stamp in red
+    canvases: list[TextLog] = []
+
+    def logging_canvas(background: int = WHITE) -> TextLog:
+        canvases.append(TextLog(background))
+        return canvases[-1]
+
+    monkeypatch.setattr(weather, "Canvas", logging_canvas)
+    for v in range(3):
+        frame_of(make_ctx(tmp_path, online=True, variant=v))
+        drawn = [(t, f) for t, f, _ in canvases[-1].texts]
+        assert (text, RED) in drawn, (v, drawn)
+
+
+def test_geocoding_is_retried_once_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    net = city_net("berlin", errors=(weather.FetchError("ConnectTimeout: timed out"),))
+    monkeypatch.setattr(weather, "fetch_json", net)
+    o = outcome(make_ctx(tmp_path, online=True))
+    assert net.urls() == [weather.GEOCODE_URL, weather.GEOCODE_URL, weather.FORECAST_URL]
+    assert sleeps == [weather.RETRY_DELAY]
+    assert o.state == "ok" and o.weather.place.display == "Berlin, Germany"
+    assert "berlin" in json.loads((tmp_path / "geocode.json").read_text(encoding="utf-8"))
+
+    # failing twice is the offline card, after exactly one retry
+    other = tmp_path / "other"
+    other.mkdir()
+    net = FakeNet(fail=overloaded())
+    monkeypatch.setattr(weather, "fetch_json", net)
+    o = outcome(make_ctx(other, online=True))
+    assert net.urls() == [weather.GEOCODE_URL] * 2 and o.state == "offline"
 
 
 def test_offline_mode_uses_any_cache_and_says_since_when(tmp_path: Path) -> None:
@@ -422,19 +592,50 @@ def test_fetch_json_maps_every_failure_to_fetch_error(monkeypatch: pytest.Monkey
 
     bad = httpx.Response(400, json={"error": True, "reason": "Latitude must be in range"})
     monkeypatch.setattr(weather.httpx, "get", respond(bad))
-    with pytest.raises(weather.FetchError, match="HTTP 400: Latitude must be in range"):
+    with pytest.raises(weather.FetchError, match="HTTP 400: Latitude must be in range") as e:
         weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is False
+
+    monkeypatch.setattr(weather.httpx, "get", respond(httpx.Response(404, text="Not Found")))
+    with pytest.raises(weather.FetchError, match="^HTTP 404$") as e:
+        weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is False
+
+    busy = httpx.Response(503, text="The service is overloaded")
+    monkeypatch.setattr(weather.httpx, "get", respond(busy))
+    with pytest.raises(weather.FetchError, match="^HTTP 503$") as e:
+        weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is True
 
     monkeypatch.setattr(weather.httpx, "get", respond(httpx.Response(200, text="<html>")))
-    with pytest.raises(weather.FetchError, match="not JSON"):
+    with pytest.raises(weather.FetchError, match="not JSON") as e:
         weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is False
 
     def down(url: str, **kw: Any) -> httpx.Response:
         raise httpx.ConnectError("no route to host")
 
     monkeypatch.setattr(weather.httpx, "get", down)
-    with pytest.raises(weather.FetchError, match="ConnectError"):
+    with pytest.raises(weather.FetchError, match="ConnectError") as e:
         weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is True
+
+    def loop(url: str, **kw: Any) -> httpx.Response:
+        raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
+
+    monkeypatch.setattr(weather.httpx, "get", loop)
+    with pytest.raises(weather.FetchError, match="TooManyRedirects") as e:
+        weather.fetch_json(weather.FORECAST_URL, {}, 4.0)
+    assert e.value.transient is False  # a redirect loop does not fix itself in 2 s
+
+    # the flag is keyword-only, defaults to transient and leaves the message alone
+    assert weather.FetchError("x").transient is True
+    err = weather.FetchError("HTTP 418", transient=False)
+    assert str(err) == "HTTP 418" and err.transient is False
+    ctx = RenderContext(settings={}, now=NOW, cache_dir=Path("."), fonts=FONTS)
+    with pytest.raises(weather.FetchError, match="out of time") as e:
+        weather._budget(ctx, time.monotonic())
+    assert e.value.transient is False
 
 
 @pytest.mark.parametrize("body", [{"results": "garbage"}, {"results": [{"name": "X"}]}, [1, 2]])
@@ -512,6 +713,62 @@ def test_extreme_values_and_long_names_still_fit(tmp_path: Path) -> None:
             assert (frame[:, :20] == WHITE).all() and (frame[:, -20:] == WHITE).all()
         else:
             assert (frame[:, -20:] == WHITE).all()
+
+
+class TextLog(Canvas):
+    """A canvas that remembers every string it draws and its bounding box."""
+
+    def __init__(self, background: int = WHITE) -> None:
+        super().__init__(background=background)
+        self.texts: list[tuple[str, int, tuple[int, int, int, int]]] = []
+
+    def text(self, xy, text, font, fill, anchor="la", threshold=128):  # type: ignore[override]
+        box = super().text(xy, text, font, fill, anchor=anchor, threshold=threshold)
+        self.texts.append((text, fill, box))
+        return box
+
+
+def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+@pytest.mark.parametrize("layout", weather.LAYOUTS)
+def test_the_longest_stamp_fits_every_layout(monkeypatch: pytest.MonkeyPatch, layout: str) -> None:
+    """Imperial (12-hour clock) data from another day, with a long place name: the
+    stamp is drawn in full, inside the margins, clear of every other text and glyph."""
+    squares: list[tuple[float, float, float, float]] = []
+    real = weather_layouts.draw_weather
+
+    def spy(c: Canvas, code: Any, is_day: Any, cx: float, cy: float, size: int, **kw: Any):
+        squares.append((cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2))
+        return real(c, code, is_day, cx, cy, size, **kw)
+
+    monkeypatch.setattr(weather_layouts, "draw_weather", spy)
+    long_name = "Llanfairpwllgwyngyllgogerychwyrndrobwllllantysiliogogogoch"
+    place = Place(long_name, "United Kingdom of Great Britain", 30.2672, -97.7431)
+    data = fixture("forecast_austin_tx.json")
+    w = parse_forecast(data, place, "imperial", NOW - timedelta(hours=40))  # Sat 22:15 local
+    w.offline, w.frame_online = True, True
+    style = Style(FONTS, imperial=True)
+    stamp, fill = meta_line(w, AUSTIN_NOW, style)
+    assert (stamp, fill) == ("COULDN'T UPDATE, DATA FROM SAT 10:15 PM", RED)
+
+    c = TextLog()
+    render = {
+        "now": weather_layouts.render_now,
+        "days": weather_layouts.render_days,
+        "poster": weather_layouts.render_poster,
+    }[layout]
+    render(c, w, AUSTIN_NOW, style)
+    drawn = [box for text, f, box in c.texts if text == stamp and f == RED]
+    assert len(drawn) == 1, [t for t, _, _ in c.texts]  # verbatim, so not ellipsised
+    box = drawn[0]
+    assert M - 2 <= box[0] and box[2] <= W - M + 1
+    others = [(t, b) for t, _, b in c.texts if t and t != stamp]
+    assert any(t.upper().startswith("LLANFAIR") for t, _ in others)  # the place is there
+    assert [t for t, b in others if _overlap(box, b)] == []
+    assert [sq for sq in squares if _overlap(box, sq)] == []
+    assert (c.to_frame()[:, -20:] == WHITE).all()
 
 
 def test_an_old_cache_spreads_the_days_it_has_left(tmp_path: Path) -> None:

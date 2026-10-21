@@ -117,7 +117,11 @@ def ellipsize(text: str, font: Font, max_width: float) -> str:
 
 
 def meta_line(w: Weather, now: datetime, style: Style) -> tuple[str, int]:
-    """``("UPDATED 21:00", BLACK)`` or ``("OFFLINE, DATA FROM 13:50", RED)``.
+    """``("UPDATED 21:00", BLACK)`` for fresh data.  Cached data shown because the
+    refresh did not happen is ``("COULDN'T UPDATE, DATA FROM 13:50", RED)`` when a
+    refresh was tried and failed (any cause, a lost connection included) and
+    ``("OFFLINE, DATA FROM 13:50", RED)`` in offline mode (``INKFRAME_OFFLINE=1``),
+    when the render may not use the network.
 
     The stamp is in the forecast location's local time, like every other time
     on the card; a day name is added when the data is not from today."""
@@ -125,6 +129,8 @@ def meta_line(w: Weather, now: datetime, style: Style) -> tuple[str, int]:
     stamp = style.clock(t)
     if t.date() != w.local_now(now).date():
         stamp = f"{fmt_day(t.date())} {stamp}"
+    if w.offline and w.frame_online:
+        return f"COULDN'T UPDATE, DATA FROM {stamp}", RED
     if w.offline:
         return f"OFFLINE, DATA FROM {stamp}", RED
     return f"UPDATED {stamp}", BLACK

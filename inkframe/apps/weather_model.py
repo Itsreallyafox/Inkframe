@@ -155,6 +155,11 @@ class Weather:
     days: list[Day] = field(default_factory=list)
     #: True when the data is a stale cache shown because a refresh failed
     offline: bool = False
+    #: whether the render was allowed to use the network (``ctx.online``, False only
+    #: in offline mode, ``INKFRAME_OFFLINE=1``): False gives the "OFFLINE" stamp; True
+    #: with ``offline`` means a refresh was tried and failed, whatever the cause (a
+    #: lost Wi-Fi connection included), and gives "COULDN'T UPDATE"
+    frame_online: bool = True
 
     # --- clocks -------------------------------------------------------------------
     def local_now(self, now: datetime) -> datetime:
