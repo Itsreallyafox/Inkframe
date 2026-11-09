@@ -228,6 +228,18 @@ a `Fit`: the 600 x 400 canvas plus the `box` the photo occupies.
 4:3 is *narrower* than the panel's 3:2, so it gets side bars, not top and
 bottom ones. Only images wider than 3:2 get top and bottom bars.
 
+**Crop** (0.2, opt-in per photo). `fit_image(master, crop)` takes the
+photo's crop, `{x, y, w, h}` fractions of the master (0..1, four decimals,
+`Photo.crop`): the region (`crop_box`, rounded to whole master pixels and
+clamped inside the image) is cut out first, then resized to exactly
+600 x 400 (Lanczos), so the box is `FULL_BOX` and there are no bars. A
+region that is already 600 x 400 is used as it is. `validate_crop(crop,
+width, height)` is the one gate (`PUT /crop` and `previews` use it): exactly
+the four keys, finite numbers, inside the image, 3:2 in master pixels within
+1 percent (the resize absorbs the rest), at least 150 x 100 master pixels.
+Without a crop the fit is byte for byte what 0.1 produced (the recorded
+hashes are tested), so `FORMAT_VERSION` did not change.
+
 ### 3. Adjust (`adjust.apply`)
 
 Applied to the pixels **inside the box only**, in a fixed order:
@@ -303,11 +315,16 @@ key = sha256(canonical JSON of {
         "recipe": complete_recipe(recipe),   # normalised: 1 == 1.0, any key order
         "dither_palette": [[r, g, b] x 6],   # the palette actually dithered against
         "png_palette":    [[r, g, b] x 6],   # the measured palette colouring the PNG
+        "crop": {"x", "y", "w", "h"},        # ONLY when the photo has a crop
      })[:16]
 ```
 
 Equal inputs give equal keys whatever the dict order. Any knob, either
-palette, the format or the engine changes the key (tested for every knob).
+palette, the format, the engine or the crop changes the key (tested for
+every knob). The crop joins the payload only when there is one: an
+uncropped photo's keys are exactly what they were before 0.2, so the
+renders already on the Pi's disk (and in browsers' caches) stay valid and
+nothing re-renders on the upgrade.
 `dither.ABI_VERSION` alone is the ctypes calling convention, not an output
 version, so the engine part also digests `dither.c` (kernels, Lab tables)
 and the blue-noise texture: a change to either changes every key, and old
@@ -347,27 +364,37 @@ photos re-render lazily.
   depends on `display.rotation` and is cheap numpy work, so the display
   driver packs at show time.
 
-**Invalidation**: there is none to do on a recipe or palette change, because
-the key changes and stale files are simply never requested again.
+**Invalidation**: there is none to do on a recipe, palette or crop change,
+because the key changes and stale files are simply never requested again.
 
 - `prune(photo_id, keep_keys)` keeps at most 40 renders per photo. The
   oldest-written go first, but never the keys in `keep_keys` (the photo's
   current render and the preview set just made). It also sweeps abandoned
   atomic-write temp files older than 10 minutes. It runs after every preview
   set and recipe change.
+- A crop change prunes harder (`max_files=0`, keeping the new crop's renders
+  of the current recipe with every method, i.e. the strip previewed before
+  Apply): every other render of the photo shows a different picture now,
+  unlike an old recipe's render, which is still a true render of that
+  recipe. The editor forgets its memoised preview URLs at the same moment.
 - `invalidate(photo_id)` removes the photo's directory on delete.
 
 **Fit LRU**: `pipeline.load_fit` memoises the 4 most recent fits (720 KB
-each), keyed by photo id, master path, mtime and size. A preview set, or a
-preview followed by a save, decodes and resizes the master once.
+each), keyed by photo id, master path, mtime, size and crop. A preview set,
+or a preview followed by a save, decodes and resizes the master once; the
+fit of a cropped photo and of its uncropped twin sit side by side.
 
-`RenderCache.render_or_get(photo, recipe, settings)` (recipe `None` means the
-effective recipe) is the one entry point that the API, the upload path and
-the photos app all use. `render_methods` makes the editor's 12-method strip:
-it adjusts the master once and dithers 12 times, and a cached method costs
-one read and decode of its PNG (about 1 ms on the desktop). A corrupt or
-foreign file under a preview key is removed and rendered again: a preview
-key is not the photo's current one, so its URL could not re-render it.
+`RenderCache.render_or_get(photo, recipe, settings, crop=None)` (recipe
+`None` means the effective recipe; the crop is `photo.crop` unless an
+override is given) is the one entry point that the API, the upload path and
+the photos app all use, so a cropped photo reaches the panel with no change
+in `apps/photos.py`. `render_methods` makes the editor's 12-method strip: it
+adjusts the master once and dithers 12 times, and a cached method costs one
+read and decode of its PNG (about 1 ms on the desktop); its `crop` override
+is how the crop tool previews a crop that is not saved yet (the keys carry
+the crop, so saving it finds the same files). A corrupt or foreign file
+under a preview key is removed and rendered again: a preview key is not the
+photo's current one, so its URL could not re-render it.
 
 The photos app (`apps/photos.py`) needs the global `Settings` snapshot as
 `RenderContext.app_settings`, since it picks the recipe and palette; anything
@@ -426,8 +453,10 @@ The photo object is `Photo.to_dict()` without `master_path`, plus
 | `POST /photos` | multipart `file` (one), optional `name` | 201 photo (its default render cached unless that failed: `render_ready`). 413 / 415 / 422, 408 for a body that stalls |
 | `GET /photos/{id}` | | photo |
 | `GET /photos/{id}/render?recipe=<key>` | | `image/png`, `Cache-Control: public, max-age=31536000, immutable`. A missing key is rendered when it is the current one, otherwise 404. Without `recipe`: the current render, `no-cache` |
-| `POST /photos/{id}/previews` | any of the recipe knobs except `method` (which is ignored); optional `"methods": [id, ...]` renders only those (the editor's live preview asks for one) | `{"previews": [{"method", "name", "description", "kind", "key", "url"} x 12, or one per asked method], "took_ms": n}` in registry order |
+| `POST /photos/{id}/previews` | any of the recipe knobs except `method` (which is ignored); optional `"methods": [id, ...]` renders only those (the editor's live preview asks for one); optional `"crop": {x, y, w, h}` previews that crop instead of the photo's (validated like `PUT /crop`) | `{"previews": [{"method", "name", "description", "kind", "key", "url"} x 12, or one per asked method], "took_ms": n}` in registry order |
 | `PUT /photos/{id}/recipe` | full or partial recipe, or `{"reset": true}`; no fields changes nothing | photo, rendered |
+| `PUT /photos/{id}/crop` | `{x, y, w, h}` fractions of the master (a 3:2 region within 1 percent, at least 150 x 100 master pixels, inside the image), or `{"reset": true}` for the letterbox fit | photo, rendered with the crop; 422 naming the field (`crop.w must be ...`, `crop: aspect ...`), nothing stored. The scheduler is told the photo changed (`invalidate(photo_id)`); the photo's other renders are pruned |
+| `GET /photos/{id}/master.jpg?max=1200` | `max` 200..2400 (default 1200) | `image/jpeg`: the master with its long side at most `max` (never upscaled), quality 85, made on the render executor; `Cache-Control: private, max-age=3600` and an `ETag` from the master's mtime and size (plus `max`), so `If-None-Match` is a 304 without touching the executor. What the editor's crop tool draws its box over |
 | `PUT /photos/{id}/flags` | `{"excluded": bool}` | photo |
 | `DELETE /photos/{id}` | | 204 |
 | `GET /recipe/default` | | the complete default recipe, plus `methods: [{id, name, description, kind}]` and `limits: {knob: {min, max} or {choices}}` |
@@ -454,6 +483,8 @@ The photo object is `Photo.to_dict()` without `master_path`, plus
 | original name | 120 characters | `masters.MAX_NAME_CHARS` |
 | renders per photo | 40 | `cache.MAX_RENDERS_PER_PHOTO` |
 | fit LRU | 4 entries | `pipeline.FIT_CACHE_SIZE` |
+| crop: smallest region / aspect tolerance / stored decimals | 150 x 100 master pixels / 1 percent off 3:2 / 4 | `pipeline.CROP_MIN_WIDTH`, `CROP_MIN_HEIGHT`, `CROP_ASPECT_TOLERANCE`, `CROP_DECIMALS` |
+| `master.jpg` long side | 200..2400, default 1200, quality 85 | `api.photos.MASTER_JPEG_*` |
 | files per upload request | 1 | multipart parser |
 
 ## Memory

@@ -2183,6 +2183,135 @@ kbd {
   transition-delay: 0.15s;
 }
 
+/* --- crop mode: the master in the screen, a 3:2 box over it --------------------------
+   .crop-area is the master letterboxed inside the 3:2 screen (its size is set
+   in percent by the editor from the master's shape); the box and its corner
+   handles are positioned in percent of it, so no layout maths runs on resize. */
+.crop-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #18181a;
+}
+
+.crop-area {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  overflow: hidden;
+}
+
+.screen .crop-master {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.crop-box {
+  position: absolute;
+  border: 1px solid var(--p-white);
+  outline: 1px solid var(--p-black);
+  /* dims everything outside the box; the area clips the spread */
+  box-shadow: 0 0 0 4000px rgb(24 24 26 / 0.55);
+  cursor: move;
+  touch-action: none;
+}
+
+.crop-box:focus-visible {
+  outline: 2px solid var(--p-yellow);
+}
+
+.crop-box.dragging {
+  cursor: grabbing;
+}
+
+/* a 32 px target centred on each corner, drawn as a 12 px square just inside
+   the box, so it stays whole when the box touches the edge of the picture */
+.crop-handle {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  touch-action: none;
+}
+
+.crop-handle::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--p-black);
+  background: var(--p-white);
+}
+
+.crop-handle[data-corner="nw"] {
+  top: -16px;
+  left: -16px;
+  cursor: nwse-resize;
+}
+
+.crop-handle[data-corner="se"] {
+  right: -16px;
+  bottom: -16px;
+  cursor: nwse-resize;
+}
+
+.crop-handle[data-corner="ne"] {
+  top: -16px;
+  right: -16px;
+  cursor: nesw-resize;
+}
+
+.crop-handle[data-corner="sw"] {
+  bottom: -16px;
+  left: -16px;
+  cursor: nesw-resize;
+}
+
+.crop-handle[data-corner="nw"]::after {
+  top: 15px;
+  left: 15px;
+}
+
+.crop-handle[data-corner="ne"]::after {
+  top: 15px;
+  right: 15px;
+}
+
+.crop-handle[data-corner="sw"]::after {
+  bottom: 15px;
+  left: 15px;
+}
+
+.crop-handle[data-corner="se"]::after {
+  right: 15px;
+  bottom: 15px;
+}
+
+.crop-bar {
+  flex-wrap: wrap;
+}
+
+.crop-bar .stage-cap {
+  flex: 1 1 160px;
+}
+
+.crop-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-left: auto;
+}
+
+/* the "Rendering" overlay belongs to the render underneath, not to the box */
+.cropping .stage-busy {
+  display: none;
+}
+
 /* three lines reserved on phones, two from 768 px, so a longer description
    never pushes the strip down under the finger */
 .method-desc {

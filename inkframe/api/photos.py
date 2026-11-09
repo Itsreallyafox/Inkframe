@@ -1,13 +1,18 @@
-"""``/api/photos``: upload, list, render, previews, recipe, flags, delete.
+"""``/api/photos``: upload, list, render, previews, recipe, crop, flags, delete.
 
 The photo object every route returns is ``Photo.to_dict()`` without
 ``master_path`` (an implementation detail), plus:
 
 ``recipe_effective``  the complete recipe the photo renders with (its
                       override, else the default recipe)
-``render_key``        the cache key of that render
+``render_key``        the cache key of that render (with the photo's crop)
 ``render_url``        ``/api/photos/<id>/render?recipe=<key>``
 ``render_ready``      whether that render is already on disk
+
+``crop`` (from ``to_dict``) is ``None`` or ``{x, y, w, h}``: the 3:2 region
+of the master that fills the panel instead of the letterbox fit.  The editor
+draws its crop box over ``GET /api/photos/<id>/master.jpg``, a downscaled
+copy of the master.
 
 Ids are 32 lowercase hex characters; anything else is a 404.  Uploads,
 renders, previews, recipe changes and deletes run on the render executor
@@ -28,12 +33,14 @@ clients cannot block every other upload (uvicorn has no body-read timeout).
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, HTTPException, Request, Response
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
+from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -65,10 +72,22 @@ UPLOAD_IDLE_SECONDS = 30.0
 #: a body still arriving after this long is a 408: 25 MB at 85 KB/s, far
 #: slower than any LAN (read at request time)
 UPLOAD_READ_SECONDS = 300.0
+#: ``master.jpg``: the long side the editor asks for by default, and its bounds
+MASTER_JPEG_DEFAULT = 1200
+MASTER_JPEG_MIN = 200
+MASTER_JPEG_MAX = 2400
+MASTER_JPEG_QUALITY = 85
+#: the master never changes after upload, so an hour is only a bound on a
+#: deleted photo's copy; the ETag makes every later request a 304
+MASTER_CACHE = "private, max-age=3600"
 
 
 class _NotFound(Exception):
     """Raised inside executor jobs; becomes a 404."""
+
+
+class _Invalid(Exception):
+    """Raised inside executor jobs for a body that fails validation; becomes a 422."""
 
 
 # --- the photo object ------------------------------------------------------------------
@@ -83,7 +102,7 @@ def photo_json(photo: Photo, settings: Settings, cache: RenderCache) -> dict[str
     d = photo.to_dict()
     d.pop("master_path", None)
     recipe = pipeline.effective_recipe(photo, settings)
-    key = pipeline.key_for(recipe, settings)
+    key = pipeline.key_for(recipe, settings, photo.crop)
     d["recipe_effective"] = recipe
     d["render_key"] = key
     d["render_url"] = render_url(photo.id, key)
@@ -102,6 +121,8 @@ async def _run(executor: Any, fn: Any, *args: Any) -> Any:
         return await run_on_render_executor(executor, fn, *args)
     except _NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
+    except _Invalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     except pipeline.RecipeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except masters.IngestError as exc:
@@ -115,6 +136,15 @@ def _get_photo(db: Database, photo_id: str) -> Photo:
     if photo is None:
         raise _NotFound(f"no photo {photo_id!r}")
     return photo
+
+
+def _valid_crop(crop: Any, photo: Photo) -> dict[str, float]:
+    """``pipeline.validate_crop`` against the photo's master size; a bad crop
+    is a 422 naming the field."""
+    try:
+        return pipeline.validate_crop(crop, photo.width, photo.height)
+    except ValueError as exc:
+        raise _Invalid(str(exc)) from None
 
 
 def _render_quietly(cache: RenderCache, photo: Photo, settings: Settings) -> str | None:
@@ -316,7 +346,7 @@ def _render_job(
     settings = store.get()
     cache = RenderCache(paths)
     recipe = pipeline.effective_recipe(photo, settings)
-    if key is not None and key != pipeline.key_for(recipe, settings):
+    if key is not None and key != pipeline.key_for(recipe, settings, photo.crop):
         data = cache.read_png(photo_id, key)  # a preview job may have written it meanwhile
         if data is None:
             raise _NotFound(f"photo {photo_id} has no render {key!r}")
@@ -334,7 +364,7 @@ def _current_from_disk(
     if photo is None:
         return None  # the executor job answers the 404
     settings = store.get()
-    key = pipeline.key_for(pipeline.effective_recipe(photo, settings), settings)
+    key = pipeline.key_for(pipeline.effective_recipe(photo, settings), settings, photo.crop)
     return RenderCache(paths).read_png(photo_id, key)
 
 
@@ -372,14 +402,16 @@ def _previews_job(
     store: SettingsStore,
     paths: DataPaths,
     methods: tuple[DitherMethod, ...] = METHODS,
+    crop: Any = None,
 ) -> list[dict[str, Any]]:
     photo = _get_photo(db, photo_id)
     settings = store.get()
     effective = pipeline.effective_recipe(photo, settings)
     base = pipeline.complete_recipe(overrides, base=effective)
+    draft = None if crop is None else _valid_crop(crop, photo)
     cache = RenderCache(paths)
-    renders = cache.render_methods(photo, base, settings, methods=methods)
-    keep = {r.key for r in renders} | {pipeline.key_for(effective, settings)}
+    renders = cache.render_methods(photo, base, settings, methods=methods, crop=draft)
+    keep = {r.key for r in renders} | {pipeline.key_for(effective, settings, photo.crop)}
     cache.prune(photo_id, keep_keys=keep)
     return [
         {
@@ -427,14 +459,110 @@ async def make_previews(
 
     ``"methods": [id, ...]`` limits the answer to those methods (still in
     registry order): the editor's live preview asks for the selected method
-    alone, so a knob change costs one dither instead of twelve on the Pi."""
+    alone, so a knob change costs one dither instead of twelve on the Pi.
+
+    ``"crop": {x, y, w, h}`` renders with that crop instead of the photo's
+    (the crop tool's live preview of a crop not saved yet; validated like
+    ``PUT /crop``, 422 naming the field).  The keys carry the crop, so
+    saving it later finds these renders, and the ones for other crops are
+    pruned as usual."""
     _require_id(photo_id)
     overrides = dict(body or {})
     overrides.pop("method", None)
     methods = _methods_filter(overrides.pop("methods", None))
+    crop = overrides.pop("crop", None)
     t0 = time.perf_counter()
-    previews = await _run(executor, _previews_job, photo_id, overrides, db, store, paths, methods)
+    previews = await _run(
+        executor, _previews_job, photo_id, overrides, db, store, paths, methods, crop
+    )
     return {"previews": previews, "took_ms": round((time.perf_counter() - t0) * 1000)}
+
+
+# --- the master, for the crop tool ----------------------------------------------------------
+
+
+def _master_etag(photo: Photo, paths: DataPaths, max_side: int) -> str:
+    """An ETag for ``master.jpg``: the master's mtime and size (it never
+    changes after upload) and the requested size."""
+    st = pipeline.master_file(photo, paths).stat()
+    return f'"{st.st_mtime_ns:x}-{st.st_size:x}-{max_side}"'
+
+
+def _master_stat(
+    photo_id: str, db: Database, paths: DataPaths, max_side: int
+) -> tuple[Photo, str] | None:
+    """The photo and its ETag, or None when the photo (or its master) is gone:
+    the executor job then answers the 404."""
+    photo = db.get_photo(photo_id)
+    if photo is None:
+        return None
+    try:
+        return photo, _master_etag(photo, paths, max_side)
+    except (pipeline.MasterMissing, OSError):
+        return None
+
+
+def _master_jpeg_job(photo_id: str, db: Database, paths: DataPaths, max_side: int) -> bytes:
+    photo = _get_photo(db, photo_id)
+    path = pipeline.master_file(photo, paths)
+    try:
+        with Image.open(path) as im:
+            im.draft("RGB", (max_side, max_side))  # JPEG DCT scaling: cheap on the Pi
+            im.load()
+            rgb = im if im.mode == "RGB" else im.convert("RGB")
+            if max(rgb.size) > max_side:
+                rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            rgb.save(buf, "JPEG", quality=MASTER_JPEG_QUALITY, optimize=True)
+    except FileNotFoundError:
+        raise pipeline.MasterMissing(
+            f"the master of photo {photo_id} is missing ({path})"
+        ) from None
+    except OSError as exc:  # corrupt JPEG
+        raise pipeline.MasterMissing(
+            f"the master of photo {photo_id} is unreadable: {exc}"
+        ) from None
+    return buf.getvalue()
+
+
+@router.get("/{photo_id}/master.jpg")
+async def get_master_jpeg(
+    photo_id: str,
+    request: Request,
+    db: DbDep,
+    paths: PathsDep,
+    executor: RenderExecutorDep,
+    max_side: Annotated[
+        int, Query(alias="max", ge=MASTER_JPEG_MIN, le=MASTER_JPEG_MAX)
+    ] = MASTER_JPEG_DEFAULT,
+) -> Response:
+    """The master downscaled so its long side is at most ``max`` pixels
+    (200..2400, default 1200; never upscaled), as a JPEG: what the editor's
+    crop tool draws its box over.  ``Cache-Control: private, max-age=3600``
+    and an ``ETag`` from the master's mtime and size; a matching
+    ``If-None-Match`` is a 304 without touching the render executor.  404
+    for an unknown photo or a missing master."""
+    _require_id(photo_id)
+    found = await run_in_threadpool(_master_stat, photo_id, db, paths, max_side)
+    if found is not None:
+        _photo, etag = found
+        headers = {"ETag": etag, "Cache-Control": MASTER_CACHE}
+        if _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+    else:
+        headers = {"Cache-Control": MASTER_CACHE}
+    data = await _run(executor, _master_jpeg_job, photo_id, db, paths, max_side)
+    return Response(content=data, media_type="image/jpeg", headers=headers)
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    """``If-None-Match`` names ``etag`` (weak or strong, any of a list, or ``*``)."""
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    plain = etag.removeprefix("W/")
+    return any(tag.strip().removeprefix("W/") == plain for tag in header.split(","))
 
 
 # --- recipe / flags / delete ---------------------------------------------------------------
@@ -500,10 +628,73 @@ async def put_recipe(
             patch = None
     result = await _run(executor, _recipe_job, photo_id, patch, db, store, paths)
     if patch is None or patch:  # something was stored: the override, or its removal
-        scheduler = getattr(request.app.state, "scheduler", None)
-        if scheduler is not None:
-            # off the event loop: it takes the scheduler's lock and writes its state
-            await run_in_threadpool(scheduler.invalidate, photo_id)
+        await _invalidate(request, photo_id)
+    return result
+
+
+async def _invalidate(request: Request, photo_id: str) -> None:
+    """Tell the scheduler the photo would render differently now."""
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is not None:
+        # off the event loop: it takes the scheduler's lock and writes its state
+        await run_in_threadpool(scheduler.invalidate, photo_id)
+
+
+def _crop_job(
+    photo_id: str, crop: Any, db: Database, store: SettingsStore, paths: DataPaths
+) -> dict[str, Any]:
+    photo = _get_photo(db, photo_id)
+    settings = store.get()
+    db.set_photo_crop(photo_id, None if crop is None else _valid_crop(crop, photo))
+    photo = _get_photo(db, photo_id)
+    cache = RenderCache(paths)
+    _render_quietly(cache, photo, settings)
+    # every other render on disk shows a different picture now: keep the new
+    # crop's renders of the current recipe (the editor's strip, rendered as
+    # previews before the crop was applied) and drop the rest
+    recipe = pipeline.effective_recipe(photo, settings)
+    keep = {pipeline.key_for({**recipe, "method": m.id}, settings, photo.crop) for m in METHODS}
+    cache.prune(photo_id, keep_keys=keep, max_files=0)
+    return photo_json(photo, settings, cache)
+
+
+@router.put("/{photo_id}/crop")
+async def put_crop(
+    photo_id: str,
+    body: Annotated[dict[str, Any], Body()],
+    request: Request,
+    db: DbDep,
+    store: SettingsDep,
+    paths: PathsDep,
+    executor: RenderExecutorDep,
+) -> dict[str, Any]:
+    """Set the photo's crop: ``{x, y, w, h}`` fractions of the master, a 3:2
+    region (within 1 percent) of at least 150 x 100 master pixels, inside
+    the image (422 naming the field, nothing stored), then render the
+    photo's recipe with it.  ``{"reset": true}`` drops the crop: the photo
+    is letterboxed to fit again.  Unlike a recipe change, the photo's other
+    renders are removed (all but the new crop's renders of its recipe): they
+    all show a different picture now.
+
+    As for the recipe, the scheduler is told the photo would render
+    differently (``Scheduler.invalidate(photo_id)``), so the next rotation
+    change repaints it if it is on the panel; nothing is refreshed early."""
+    _require_id(photo_id)
+    crop: Any = dict(body)
+    if "reset" in crop:
+        reset = crop.pop("reset")
+        if not isinstance(reset, bool):
+            raise HTTPException(
+                status_code=422, detail=f"reset must be true or false, got {reset!r}"
+            )
+        if reset:
+            if crop:
+                raise HTTPException(
+                    status_code=422, detail="reset cannot be combined with crop fields"
+                )
+            crop = None
+    result = await _run(executor, _crop_job, photo_id, crop, db, store, paths)
+    await _invalidate(request, photo_id)
     return result
 
 

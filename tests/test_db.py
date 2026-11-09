@@ -58,8 +58,56 @@ def test_failed_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyP
     with pytest.raises(sqlite3.OperationalError):
         Database(path)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='extra'").fetchone() is None
+
+
+def test_v2_adds_the_crop_column_to_an_existing_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0.1 database (schema v1, photos without a crop column) gains the
+    column; its rows read back with ``crop is None``."""
+    path = tmp_path / "inkframe.db"
+    with monkeypatch.context() as m:
+        m.setattr(dbmod, "MIGRATIONS", dbmod.MIGRATIONS[:1])
+        m.setattr(dbmod, "SCHEMA_VERSION", 1)
+        old = Database(path)
+        assert old.schema_version == 1
+        with sqlite3.connect(path) as conn:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+            assert "crop" not in columns
+            conn.execute(
+                "INSERT INTO photos (id, original_name, created_at, width, height, portrait,"
+                " excluded, recipe, master_path, master_bytes)"
+                " VALUES ('a' * 32, 'old.jpg', '2026-10-19T12:00:00.000+00:00', 800, 1200, 1,"
+                " 0, NULL, 'masters/old.jpg', 10)"
+            )
+        old.close()
+    db = Database(path)
+    assert db.schema_version == SCHEMA_VERSION == 2
+    with sqlite3.connect(path) as conn:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+        assert "crop" in columns
+    (photo,) = db.list_photos()
+    assert photo.original_name == "old.jpg" and photo.crop is None
+    assert photo.to_dict()["crop"] is None
+    db.close()
+
+
+def test_photo_crop_round_trip(db: Database) -> None:
+    p = add(db)
+    assert p.crop is None and p.to_dict()["crop"] is None
+    crop = {"x": 0.0, "y": 0.2778, "w": 1.0, "h": 0.4444}
+    assert db.set_photo_crop(p.id, crop) is True
+    got = db.get_photo(p.id)
+    assert got.crop == crop and got.to_dict()["crop"] == crop
+    assert got.crop is not crop  # a copy, not the caller's dict
+    assert db.set_photo_crop(p.id, None) is True
+    assert db.get_photo(p.id).crop is None
+    assert db.set_photo_crop("missing", crop) is False
+    # add_photo can store one straight away
+    q = add(db, "cropped.jpg", crop=crop)
+    assert q.crop == crop and db.get_photo(q.id).crop == crop
 
 
 def test_newer_schema_is_refused(tmp_path: Path) -> None:

@@ -6,6 +6,6 @@ Run from the repository root with ``python -m inkframe``.  See README.md.
 from __future__ import annotations
 
 #: Keep in sync with ``pyproject.toml``.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 #: sent on every outbound request (weather, headlines, quotes)
 USER_AGENT = f"Inkframe/{__version__} (e-ink photo frame)"

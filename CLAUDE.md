@@ -56,8 +56,9 @@ is the original plan and is wrong in places (below).
   `PaletteSettings`, `RotationSettings` = `PhotoStream` + `AppTurn`s; the 0.1 slot list is converted on load),
   `DEFAULT_RECIPE`, `RECIPE_RANGES`, `validate_recipe`, `SettingsStore`
   (`get` lock-free; `replace/update/patch` validate, save atomically, swap). Bad file -> `settings.json.invalid`.
-- `db.py` `Database` (sqlite3, WAL, one RLock): `Photo`, `add/get/list/delete_photo`, `set_photo_recipe/excluded`,
-  `get/set_app_settings`, `get/set_state`; `MIGRATIONS` is append-only. `paths.py`: `DataPaths`,
+- `db.py` `Database` (sqlite3, WAL, one RLock): `Photo` (incl. `crop`, `{x,y,w,h}` fractions or None),
+  `add/get/list/delete_photo`, `set_photo_recipe/excluded/crop`,
+  `get/set_app_settings`, `get/set_state`; `MIGRATIONS` is append-only (v2 added `photos.crop`). `paths.py`: `DataPaths`,
   `resolve_data_dir`, `atomic_write_bytes`. `log.py`: `configure_logging`, `get_recent_logs` (500-line ring).
 - `scheduler.py` `Scheduler`: `tick(now)` (one decision, at most one refresh, returns next delay),
   `start/stop/wake`, `pause/resume`, `show_now(app_id|photo_id, variant)`, `show_next`, `invalidate`
@@ -69,9 +70,11 @@ is the original plan and is wrong in places (below).
   `DisplayError/Timeout/NotReady`. `display/epd4in0e.py` `EPD4in0e` (real panel; injectable `SpiBus`/`Gpio`),
   `mock.py` `MockDisplay`, `factory.py` `create_display(kind, ...)` (imports the driver lazily).
 - `render/dither.py` (+ `dither.c`, `blue_noise_64.npy`): ctypes wrapper, `METHODS` registry (12), `dither()`.
-  `masters.py` `ingest()` (sniff, bomb/memory guards, master JPEG). `pipeline.py`: `fit_image`, `render_frame`,
-  `complete_recipe`, `effective_recipe`, `recipe_key`, `FORMAT_VERSION`. `adjust.py` `apply`. `cache.py`
-  `RenderCache` (`render_or_get`, `render_methods`, `prune`, `invalidate`).
+  `masters.py` `ingest()` (sniff, bomb/memory guards, master JPEG). `pipeline.py`: `fit_image(master, crop)`
+  (crop first, then exactly 600x400; no crop = the 0.1 letterbox byte for byte), `crop_box`, `validate_crop`,
+  `render_frame`, `complete_recipe`, `effective_recipe`, `recipe_key(..., crop=)`/`key_for(recipe, settings, crop)`,
+  `FORMAT_VERSION`. `adjust.py` `apply`. `cache.py` `RenderCache` (`render_or_get`, `render_methods`, both
+  honouring `photo.crop` or a `crop` override, `prune`, `invalidate`).
 - `apps/base.py`: `App` protocol, `Field`, `validate_settings`, `RenderContext`, `FontLibrary`,
   `render_to_frame`, `AppError`. `apps/__init__.py`: `APP_IDS`, `load_app`. `apps/draw.py` `Canvas`
   (palette-only drawing, thresholded text). `apps/photos.py` (serves cached renders); `weather*.py`
@@ -109,7 +112,9 @@ is the original plan and is wrong in places (below).
   saturation, gamma, sharpen, palette`. Ranges in `config.RECIPE_RANGES`; `distance` in `rgb|lab`; `palette`
   in `nominal|measured`. `settings.palette.use_measured` is the global switch: off, every photo dithers
   against `NOMINAL` whatever `recipe.palette` says (`pipeline.resolve_render_palette`).
-  Render key = sha256[:16] of recipe + both palettes + `FORMAT_VERSION` + engine ABI/`dither.c`/blue-noise digest.
+  Render key = sha256[:16] of recipe + both palettes + `FORMAT_VERSION` + engine ABI/`dither.c`/blue-noise digest,
+  plus `"crop": {x,y,w,h}` ONLY when the photo has a crop (uncropped keys never change: the Pi's cache stays valid).
+  The crop is per photo (`Photo.crop`, `PUT /api/photos/{id}/crop`), never a recipe key.
 - **/api/status** (every key always present, unknown = null): `version`; `display{kind,width,height,awake}`;
   `panel{state,last_refresh_at,last_attempt_at,last_source{type,id,label[,variant]},last_error{at,kind,app_id,
   message}}`; `rotation{paused,quiet,quiet_until,current{app_id,label,photo_id,started_at,ends_at},next,next_at,

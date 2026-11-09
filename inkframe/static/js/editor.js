@@ -18,6 +18,14 @@
 // those knobs is instant) but not shown.  Until the strip has caught up with
 // the current knobs its tiles are marked stale rather than swapped one by
 // one while a slider is still moving.
+//
+// Crop mode (C).  The stage shows the master (GET master.jpg) with a 3:2
+// box over it: drag inside to move, drag a corner to resize (the opposite
+// corner stays put), arrows nudge by 1% (Shift 5%).  The box is a draft
+// {x, y, w, h} in fractions of the master; the knob signature carries the
+// effective crop (the draft, else the stored one), so the strip previews
+// the draft through the same debounce and pump, and Cancel is instant.
+// Apply is PUT /crop; it is not part of the recipe's dirty state.
 
 import { api, getRecipeMeta, queuedMessage, setRecipeMeta } from "./api.js";
 import { confirmDialog, debounce, displayName, emptyState, eyebrow, fmtDate, h, icon, loading, segmented, switchInput, toast } from "./ui.js";
@@ -41,6 +49,14 @@ const SLIDERS = [
 ];
 const KNOB_KEYS = ["strength", "brightness", "contrast", "saturation", "gamma", "sharpen", "serpentine", "distance", "palette"];
 const KIND_LABELS = { error_diffusion: "diffusion", ordered: "ordered", nearest: "nearest" };
+// the crop tool: the master's long side it draws over, the smallest crop in
+// master pixels (the server's limit) and the keyboard nudges
+const MASTER_MAX = 1200;
+const CROP_MIN_PX = 150;
+const NUDGE = 0.01;
+const NUDGE_BIG = 0.05;
+
+const round4 = (v) => Math.round(v * 1e4) / 1e4;
 
 function pickKnobs(recipe) {
   const out = {};
@@ -68,11 +84,16 @@ export function editorView(root, id) {
   let followers = null; // photos without their own recipe (they follow the default)
   let actionsInView = false;
   let focus = { x: 300, y: 200 }; // centre of the detail, in panel pixels
+  let cropMode = false;
+  let draft = null; // {x, y, w, h} fractions of the master while in crop mode
+  let busyCrop = false;
   const observers = [];
 
   root.append(h("a", { class: "back", href: "#/photos" }, icon("back"), "Photos"), loading("Opening the photo"));
 
-  const sig = () => JSON.stringify(knobs);
+  // the crop the previews render with: the draft in crop mode, else the stored one
+  const effectiveCrop = () => (cropMode && draft ? draft : photo.crop || null);
+  const sig = () => JSON.stringify({ ...knobs, crop: effectiveCrop() });
   const isDirty = () => !!saved && (method !== saved.method || KNOB_KEYS.some((k) => knobs[k] !== saved[k]));
   const methodName = (mid) => (methods.find((m) => m.id === mid) || {}).name || mid;
 
@@ -103,9 +124,25 @@ export function editorView(root, id) {
     const focusBox = h("span", { class: "stage-focus", "aria-hidden": "true" });
     const stageScroll = h("div", { class: "stage-scroll", dataset: { zoom: "fit" } }, stageImg, focusBox);
     const busy = h("div", { class: "stage-busy", "aria-hidden": "true" }, h("span", { class: "refresh-bar" }, ["black", "white", "yellow", "red", "blue", "green"].map((c) => h("i", { class: `sw-${c}` }))), h("span", { class: "stage-busy-label mono" }, "Rendering"));
-    const bezel = h("div", { class: "bezel stage-bezel" }, h("div", { class: "screen" }, stageScroll), busy);
-    const stage = h("section", { class: "editor-stage", "aria-label": "Preview" }, bezel,
-      h("div", { class: "stage-bar" }, h("p", { class: "stage-cap mono", "aria-live": "polite" }, capName, took), zoom.el));
+
+    // crop mode: the master in place of the render, a 3:2 box over it
+    const masterImg = h("img", { class: "crop-master", alt: `${displayName(photo.original_name)}, the whole photo`, draggable: "false", decoding: "async" });
+    const handles = ["nw", "ne", "sw", "se"].map((c) => h("span", { class: "crop-handle", dataset: { corner: c }, "aria-hidden": "true" }));
+    const cropBox = h("div", { class: "crop-box", tabindex: "0", role: "group", "aria-label": "Crop box. Arrow keys move it (Shift: larger steps); drag a corner to resize." }, handles);
+    const cropArea = h("div", { class: "crop-area" }, masterImg, cropBox);
+    const cropLayer = h("div", { class: "crop-layer", hidden: true }, cropArea);
+    masterImg.addEventListener("error", () => toast("Could not load the photo to crop it.", "error"));
+    const bezel = h("div", { class: "bezel stage-bezel" }, h("div", { class: "screen" }, stageScroll, cropLayer), busy);
+
+    const stageBar = h("div", { class: "stage-bar" }, h("p", { class: "stage-cap mono", "aria-live": "polite" }, capName, took), zoom.el);
+    const cropInfo = h("span", { class: "crop-info" });
+    const applyCropBtn = h("button", { class: "btn btn-primary btn-sm", type: "button", onclick: applyCrop, title: "Save this crop for the photo (Enter)" }, icon("check"), h("span", null, "Apply crop"));
+    const cancelCropBtn = h("button", { class: "btn btn-sm", type: "button", onclick: () => exitCrop(), title: "Leave the crop as it was (Esc)" }, "Cancel");
+    const resetCropBtn = h("button", { class: "btn-link", type: "button", onclick: resetCrop, hidden: true, title: "Drop the crop: the whole photo with white bars" }, "Reset to fit");
+    const cropBar = h("div", { class: "stage-bar crop-bar", hidden: true },
+      h("p", { class: "stage-cap mono" }, cropInfo),
+      h("div", { class: "crop-bar-actions" }, resetCropBtn, cancelCropBtn, applyCropBtn));
+    const stage = h("section", { class: "editor-stage", "aria-label": "Preview" }, bezel, stageBar, cropBar);
     const sentinel = h("div", { class: "stage-sentinel", "aria-hidden": "true" });
 
     // the method strip
@@ -177,14 +214,15 @@ export function editorView(root, id) {
     const status = h("p", { class: "editor-status", role: "status" });
     const saveBtn = h("button", { class: "btn btn-primary", type: "button", onclick: save, title: "Save this recipe for the photo (Ctrl+S)" }, icon("check"), h("span", null, "Save"));
     const showBtn = h("button", { class: "btn", type: "button", onclick: showOnPanel }, icon("show"), h("span", null, "Show on panel"));
+    const cropBtn = h("button", { class: "btn", type: "button", onclick: () => (cropMode ? exitCrop() : enterCrop()), "aria-pressed": "false", title: "Choose the part of the photo that fills the panel, instead of white bars (C)" }, icon("crop"), h("span", null, "Crop"));
     const defaultBtn = h("button", { class: "btn-link", type: "button", onclick: saveAsDefault }, "Make this the default…");
     const defaultNote = h("p", { class: "field-help default-note" });
     const resetBtn = h("button", { class: "btn-link", type: "button", onclick: reset }, "Reset to the default recipe");
     const actions = h("div", { class: "editor-actions" },
       status,
-      h("div", { class: "editor-actions-main" }, saveBtn, showBtn),
+      h("div", { class: "editor-actions-main" }, saveBtn, showBtn, cropBtn),
       h("div", { class: "editor-actions-more" }, h("div", null, defaultBtn, defaultNote), resetBtn));
-    const keys = h("p", { class: "kbd-hint" }, h("kbd", null, "←"), h("kbd", null, "→"), " method · ", h("kbd", null, "Z"), " zoom · ", h("kbd", null, "D"), " detail · ", h("kbd", null, "R"), " refresh · ", h("kbd", null, "Ctrl S"), " save");
+    const keys = h("p", { class: "kbd-hint" }, h("kbd", null, "←"), h("kbd", null, "→"), " method · ", h("kbd", null, "Z"), " zoom · ", h("kbd", null, "D"), " detail · ", h("kbd", null, "C"), " crop · ", h("kbd", null, "R"), " refresh · ", h("kbd", null, "Ctrl S"), " save");
 
     const panel = h("aside", { class: "editor-panel", "aria-label": "Adjustments" }, eyebrow("Adjustments"), h("div", { class: "knobs" }, sliderRows), toggles, actions, keys);
 
@@ -197,9 +235,10 @@ export function editorView(root, id) {
 
     root.replaceChildren(h("a", { class: "back", href: "#/photos" }, icon("back"), "Photos"), head,
       h("div", { class: "editor" }, h("div", { class: "editor-main" }, sentinel, stage, methodsSection), panel), savebar);
-    el = { title, metaLine, zoom, view, capName, took, stage, stageImg, stageScroll, focusBox, bezel, desc, strip, stripNote, tiles, tip, sliders, serp, dist, pal, status, saveBtn, showBtn, defaultBtn, defaultNote, resetBtn, toggles, savebar, barSave };
+    el = { title, metaLine, zoom, view, capName, took, stage, stageImg, stageScroll, focusBox, bezel, desc, strip, stripNote, tiles, tip, sliders, serp, dist, pal, status, saveBtn, showBtn, defaultBtn, defaultNote, resetBtn, toggles, savebar, barSave, stageBar, cropBar, cropLayer, cropArea, cropBox, masterImg, cropInfo, cropBtn, applyCropBtn, cancelCropBtn, resetCropBtn };
 
     wireStage();
+    wireCrop();
     if ("IntersectionObserver" in window) {
       const io = new IntersectionObserver((entries) => {
         actionsInView = entries.some((e) => e.isIntersecting);
@@ -221,9 +260,11 @@ export function editorView(root, id) {
 
   function renderMeta() {
     const parts = [`${photo.width} × ${photo.height}`, `added ${fmtDate(photo.created_at)}`, photo.recipe ? "own recipe" : "follows the default recipe"];
-    if (photo.portrait) parts.push("portrait: letterboxed");
+    if (photo.crop) parts.push("cropped");
+    else if (photo.portrait) parts.push("portrait: letterboxed");
     if (photo.excluded) parts.push("excluded from the rotation");
     el.metaLine.textContent = parts.join(" · ");
+    el.resetCropBtn.hidden = !photo.crop;
   }
 
   function renderSelection() {
@@ -373,6 +414,207 @@ export function editorView(root, id) {
     };
     s.addEventListener("pointerup", end);
     s.addEventListener("pointercancel", end);
+  }
+
+  // --- crop mode ----------------------------------------------------------------------------
+
+  // h = K * w keeps the box 3:2 in master pixels whatever the master's shape
+  const K = () => photo.width / (1.5 * photo.height);
+  const minW = () => Math.min(1, Math.ceil((CROP_MIN_PX / photo.width) * 1e4) / 1e4);
+
+  /** The largest centred 3:2 box: the whole height of a wide master, the whole width of a tall one. */
+  function fillCrop() {
+    const k = K();
+    return k >= 1 ? { x: (1 - 1 / k) / 2, y: 0, w: 1 / k, h: 1 } : { x: 0, y: (1 - k) / 2, w: 1, h: k };
+  }
+
+  /** Four decimals, inside the image (what the server stores and validates). */
+  function normCrop(c) {
+    const w = Math.min(1, round4(c.w));
+    const hh = Math.min(1, round4(c.h));
+    const x = Math.min(Math.max(0, round4(c.x)), round4(1 - w));
+    const y = Math.min(Math.max(0, round4(c.y)), round4(1 - hh));
+    return { x, y, w, h: hh };
+  }
+
+  function moved(start, dx, dy) {
+    return { ...start, x: Math.min(Math.max(0, start.x + dx), 1 - start.w), y: Math.min(Math.max(0, start.y + dy), 1 - start.h) };
+  }
+
+  /** Resize from `corner` towards the pointer (px, py in fractions); the opposite corner stays. */
+  function resized(start, corner, px, py) {
+    const k = K();
+    const east = corner.includes("e");
+    const south = corner.includes("s");
+    const ax = east ? start.x : start.x + start.w;
+    const ay = south ? start.y : start.y + start.h;
+    const dw = east ? px - ax : ax - px;
+    const dh = south ? py - ay : ay - py;
+    const room = Math.min(east ? 1 - ax : ax, (south ? 1 - ay : ay) / k);
+    const w = Math.min(Math.max(minW(), Math.max(dw, dh / k)), room);
+    const hh = w * k;
+    return { x: east ? ax : ax - w, y: south ? ay : ay - hh, w, h: hh };
+  }
+
+  function renderCropBox() {
+    if (!draft) return;
+    Object.assign(el.cropBox.style, { left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.w * 100}%`, height: `${draft.h * 100}%` });
+    el.cropInfo.textContent = `${Math.round(draft.w * photo.width)} × ${Math.round(draft.h * photo.height)} of ${photo.width} × ${photo.height} px`;
+  }
+
+  function renderCropButtons() {
+    el.applyCropBtn.disabled = busyCrop || !draft;
+    el.cancelCropBtn.disabled = busyCrop;
+    el.resetCropBtn.disabled = busyCrop;
+  }
+
+  function setDraft(c) {
+    const next = normCrop(c);
+    if (draft && ["x", "y", "w", "h"].every((k) => next[k] === draft[k])) return;
+    draft = next;
+    renderCropBox();
+    knobsChanged(); // the strip previews the draft (not a recipe change: Save stays as it was)
+  }
+
+  function enterCrop() {
+    if (cropMode || !el.cropLayer) return;
+    cropMode = true;
+    draft = normCrop(photo.crop ? { ...photo.crop } : fillCrop());
+    setZoom("fit");
+    // the master letterboxed inside the 3:2 screen; the box is placed in percent of it
+    const k = K();
+    Object.assign(el.cropArea.style, k >= 1 ? { width: "100%", height: `${(100 / k).toFixed(3)}%` } : { width: `${(100 * k).toFixed(3)}%`, height: "100%" });
+    if (!el.masterImg.getAttribute("src")) el.masterImg.src = `/api/photos/${id}/master.jpg?max=${MASTER_MAX}`;
+    el.cropLayer.hidden = false;
+    el.stageBar.hidden = true;
+    el.cropBar.hidden = false;
+    el.stage.classList.add("cropping");
+    el.cropBtn.setAttribute("aria-pressed", "true");
+    el.cropBtn.querySelector("span:last-child").textContent = "Stop cropping";
+    renderCropBox();
+    renderCropButtons();
+    el.cropBox.focus({ preventScroll: true });
+    knobsChanged();
+  }
+
+  function exitCrop() {
+    if (!cropMode) return;
+    cropMode = false;
+    draft = null;
+    el.cropLayer.hidden = true;
+    el.stageBar.hidden = false;
+    el.cropBar.hidden = true;
+    el.stage.classList.remove("cropping");
+    el.cropBtn.setAttribute("aria-pressed", "false");
+    el.cropBtn.querySelector("span:last-child").textContent = "Crop";
+    // back to the stored crop: instant when its previews are still known
+    blocked = "";
+    stripWanted = true;
+    previewSoon.cancel();
+    stripSoon.cancel();
+    showSelected();
+    applyStrip();
+    pump();
+    refreshBusy();
+    el.cropBtn.focus({ preventScroll: true });
+  }
+
+  function nudge(dx, dy) {
+    if (!draft) return;
+    setDraft(moved(draft, dx, dy));
+  }
+
+  function wireCrop() {
+    const box = el.cropBox;
+    let drag = null;
+    const frac = (e) => {
+      const r = el.cropArea.getBoundingClientRect();
+      return { x: r.width ? (e.clientX - r.left) / r.width : 0, y: r.height ? (e.clientY - r.top) / r.height : 0 };
+    };
+    box.addEventListener("pointerdown", (e) => {
+      if (!cropMode || !draft || busyCrop || (e.pointerType === "mouse" && e.button !== 0)) return;
+      e.preventDefault();
+      const p = frac(e);
+      const corner = e.target instanceof Element ? e.target.closest(".crop-handle") : null;
+      drag = { id: e.pointerId, corner: corner ? corner.dataset.corner : null, start: { ...draft }, px: p.x, py: p.y };
+      try {
+        box.setPointerCapture(e.pointerId);
+      } catch {
+        // a pointer that is already gone: the drag ends with the next event
+      }
+      box.classList.add("dragging");
+      box.focus({ preventScroll: true });
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const p = frac(e);
+      setDraft(drag.corner ? resized(drag.start, drag.corner, p.x, p.y) : moved(drag.start, p.x - drag.px, p.y - drag.py));
+    });
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag = null;
+      box.classList.remove("dragging");
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    box.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyCrop();
+      }
+      // arrows and Escape: the document handler, which also works when the box has no focus
+    });
+  }
+
+  /** Arrow keys in crop mode: 1% of the image, 5% with Shift.  True if handled. */
+  function cropKey(e) {
+    const step = e.shiftKey ? NUDGE_BIG : NUDGE;
+    if (e.key === "ArrowLeft") nudge(-step, 0);
+    else if (e.key === "ArrowRight") nudge(step, 0);
+    else if (e.key === "ArrowUp") nudge(0, -step);
+    else if (e.key === "ArrowDown") nudge(0, step);
+    else if (e.key === "Escape") exitCrop();
+    else return false;
+    e.preventDefault();
+    return true;
+  }
+
+  async function applyCrop() {
+    if (!cropMode || !draft || busyCrop) return;
+    busyCrop = true;
+    renderCropButtons();
+    try {
+      const updated = await api(`/api/photos/${id}/crop`, { method: "PUT", body: draft });
+      adopt(updated);
+      known.clear(); // the frame dropped the other crops' renders: ask again
+      exitCrop();
+      setStage(photo.render_url);
+      toast(`Cropped: ${displayName(photo.original_name)} fills the panel with the part you chose.`, "ok");
+    } catch {
+      // toasted
+    } finally {
+      busyCrop = false;
+      renderCropButtons();
+    }
+  }
+
+  async function resetCrop() {
+    if (busyCrop) return;
+    busyCrop = true;
+    renderCropButtons();
+    try {
+      const updated = await api(`/api/photos/${id}/crop`, { method: "PUT", body: { reset: true } });
+      adopt(updated);
+      known.clear();
+      exitCrop();
+      setStage(photo.render_url);
+      toast("Reset: the whole photo shows again, with bars where it does not fit.", "ok");
+    } catch {
+      // toasted
+    } finally {
+      busyCrop = false;
+      renderCropButtons();
+    }
   }
 
   // --- previews ---------------------------------------------------------------------------
@@ -593,7 +835,11 @@ export function editorView(root, id) {
     }
     if (typing || tag === "TEXTAREA" || tag === "SELECT" || e.ctrlKey || e.metaKey || e.altKey) return;
     const key = e.key.toLowerCase();
-    if (key === "z") {
+    if (cropMode && cropKey(e)) return;
+    if (key === "c") {
+      if (cropMode) exitCrop();
+      else enterCrop();
+    } else if (key === "z" && !cropMode) {
       const order = ["fit", "1", "2"];
       setZoom(order[(order.indexOf(el.stageScroll.dataset.zoom) + 1) % order.length]);
     } else if (key === "d") {
@@ -615,6 +861,7 @@ export function editorView(root, id) {
     renderMeta();
     renderSelection();
     renderDirty();
+    renderCropButtons();
   }
 
   async function loadFollowers() {

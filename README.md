@@ -160,8 +160,8 @@ from a CDN. Screenshots are in `docs/ui/`; the design notes are `docs/UI.md`.
 | View | What it does |
 |---|---|
 | Now | The last frame exactly as the panel shows it, what is showing and what is next with a countdown, Show next, Pause / Resume, panel state, last refresh and keep-alive times. |
-| Photos | Grid of the dithered renders, drop zone and file picker with per-file progress and browser-side downscale, portrait and excluded badges, Show / Exclude / Delete per photo. |
-| Editor (`#/photos/<id>`) | Large preview, a strip of all 12 dither methods (Detail or Whole), sliders for strength, brightness, contrast, saturation, gamma and sharpen, serpentine and distance toggles, zoom, Save / Make default / Reset / Show on panel. |
+| Photos | Grid of the dithered renders, drop zone and file picker with per-file progress and browser-side downscale, Cropped, Portrait (uncropped only) and Excluded badges, Show / Exclude / Delete per photo. |
+| Editor (`#/photos/<id>`) | Large preview, a strip of all 12 dither methods (Detail or Whole), sliders for strength, brightness, contrast, saturation, gamma and sharpen, serpentine and distance toggles, zoom, a Crop tool (a 3:2 box over the whole photo: move, resize from a corner, nudge with the arrows; Apply / Cancel / Reset to fit) with live previews, Save / Make default / Reset / Show on panel. |
 | Rotation | Photos in a row (how many, minutes each, shuffle or in order), then the cards: every app with on/off and minutes, drag-to-reorder; a cycle strip with the cycle length, the photo share and how often each card comes round, live; quiet hours, refresh floor, keep-alive, clear-before-refresh. |
 | Apps | A form per app generated from its settings schema, with a preview image that never touches the panel. |
 | Settings | Palette editor and test card, panel rotation, storage use, log tail, restart. |
@@ -198,6 +198,15 @@ so the letterbox bars are exact palette white whatever the recipe.
   changes every photo that follows it. If the photo on the panel changes
   recipe, the next rotation change repaints it instead of skipping it as
   already showing.
+- **Crop.** Opt-in per photo: the editor's Crop tool puts a 3:2 box over
+  the whole photo, so a portrait or square picture fills the panel with the
+  part you chose instead of white bars (fit-with-bars stays the default; there
+  is no rotate). The crop is stored on the photo as fractions of the master
+  (`{x, y, w, h}`, `PUT /api/photos/{id}/crop`), not in the recipe; the
+  pipeline cuts the region out first and resizes it to exactly 600 x 400,
+  and the crop joins the render key only when there is one, so uncropped
+  renders and their cache stay exactly as before. "Reset to fit" brings the
+  bars back. The Photos grid marks cropped photos.
 - **Methods.** None, Floyd-Steinberg, Atkinson, Jarvis, Stucki, Burkes, Sierra,
   Sierra two-row, Sierra Lite, Bayer 4x4, Bayer 8x8, blue noise. The engine
   is C, integer-only, bit-identical between MSVC/x64 and gcc/aarch64
@@ -318,7 +327,7 @@ hex characters. `/docs` is FastAPI's Swagger page and needs internet for its ass
 | `GET /api/display/frame.png`, `POST /api/display/next\|pause\|resume\|show` | the panel's last frame; scheduler controls (`show` takes `{app_id[, variant]}` or `{photo_id}`) |
 | `GET/PUT /api/rotation` | the photo stream and the cards, every registered app listed (validated more strictly than `/api/settings`) |
 | `GET /api/apps`, `GET/PUT /api/apps/{id}/settings`, `GET /api/apps/{id}/preview.png?variant=&seed=` | apps, their forms and previews |
-| `GET/POST /api/photos`, `GET/DELETE /api/photos/{id}`, `GET /api/photos/{id}/render[?recipe=<key>]`, `POST /api/photos/{id}/previews`, `PUT /api/photos/{id}/recipe`, `PUT /api/photos/{id}/flags` | photos |
+| `GET/POST /api/photos`, `GET/DELETE /api/photos/{id}`, `GET /api/photos/{id}/render[?recipe=<key>]`, `GET /api/photos/{id}/master.jpg[?max=1200]`, `POST /api/photos/{id}/previews`, `PUT /api/photos/{id}/recipe`, `PUT /api/photos/{id}/crop`, `PUT /api/photos/{id}/flags` | photos (`master.jpg` is the downscaled master the crop tool draws over; `crop` takes `{x, y, w, h}` or `{"reset": true}`) |
 | `GET/PUT /api/recipe/default` | default recipe plus the method registry and knob limits |
 
 ## Where things live

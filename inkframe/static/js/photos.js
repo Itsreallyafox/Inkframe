@@ -34,7 +34,7 @@ export function photosView(root) {
     icon("upload", "dropzone-icon"),
     h("div", null,
       h("p", { class: "dropzone-title" }, h("span", { class: "only-touch" }, "Tap to add photos"), h("span", { class: "only-pointer" }, "Drop photos here, or choose files")),
-      h("p", { class: "dropzone-text" }, "JPEG, PNG or HEIC, up to 25 MB each. Landscape fills the frame; portrait gets white bars."),
+      h("p", { class: "dropzone-text" }, "JPEG, PNG or HEIC, up to 25 MB each. Landscape fills the frame; portrait gets white bars unless you crop it in the editor."),
     ),
   );
   const uploads = h("ul", { class: "uploads", "aria-label": "Uploads", "aria-live": "polite" });
@@ -202,7 +202,8 @@ export function photosView(root) {
     img.addEventListener("load", () => media.classList.add("loaded"));
     img.addEventListener("error", () => media.classList.add("broken"));
     const badges = h("div", { class: "tile-badges" },
-      photo.portrait ? h("span", { class: "badge badge-warn", title: "Portrait photos are letterboxed with white bars; the frame is landscape." }, "Portrait") : null,
+      photo.crop ? h("span", { class: "badge", title: "Cropped: the part you chose fills the panel" }, "Cropped") : null,
+      photo.portrait && !photo.crop ? h("span", { class: "badge badge-warn", title: "Portrait photos are letterboxed with white bars; the frame is landscape. Crop it in the editor to fill the panel." }, "Portrait") : null,
       photo.excluded ? h("span", { class: "badge badge-muted", title: "Not shown in the rotation" }, "Excluded") : null,
     );
     media.append(badges);

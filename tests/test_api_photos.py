@@ -281,6 +281,225 @@ def test_recipe_put_without_fields_pins_nothing(client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["recipe"] == own
 
 
+# --- crop ---------------------------------------------------------------------------------------
+
+#: the fill crop of a 1200 x 1800 portrait master (the middle 3:2 band)
+CROP = {"x": 0.0, "y": 0.2778, "w": 1.0, "h": 0.4444}
+
+
+def _portrait_quadrants() -> Image.Image:
+    a = np.zeros((1800, 1200, 3), dtype=np.uint8)
+    a[:900, :600] = (220, 30, 30)
+    a[:900, 600:] = (30, 200, 60)
+    a[900:, :600] = (30, 60, 220)
+    a[900:, 600:] = (240, 220, 40)
+    return Image.fromarray(a)
+
+
+def _direct_cropped(
+    data_dir: Path, photo: dict[str, Any], recipe: dict[str, Any], crop: dict[str, float]
+) -> np.ndarray:
+    master = Image.open(data_dir / "masters" / f"{photo['id']}.jpg")
+    palette = MEASURED_DEFAULT if recipe["palette"] == "measured" else pipeline.NOMINAL
+    return pipeline.render_frame(pipeline.fit_image(master, crop), recipe, palette)
+
+
+def test_crop_put_and_reset(
+    client: TestClient, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    photo = upload(client, jpeg_bytes(_portrait_quadrants()), "tall.jpg").json()
+    pid, plain_key = photo["id"], photo["render_key"]
+    assert photo["crop"] is None and photo["portrait"] is True
+    plain = _decode(client.get(photo["render_url"]).content)
+    assert np.all(plain[:, :166] == WHITE)  # letterboxed
+    renders = data_dir / "renders" / pid
+    assert {p.stem for p in renders.glob("*.png")} == {plain_key}
+    calls = _spy_scheduler(client, monkeypatch)
+
+    r = client.put(f"/api/photos/{pid}/crop", json={"x": 0, "y": 0.2778, "w": 1, "h": 0.4444})
+    assert r.status_code == 200, r.text
+    cropped = r.json()
+    assert cropped["crop"] == CROP  # normalised to floats
+    assert cropped["render_key"] != plain_key and cropped["render_ready"] is True
+    assert cropped["render_url"] == f"/api/photos/{pid}/render?recipe={cropped['render_key']}"
+    assert cropped["recipe"] is None and cropped["recipe_effective"] == RECIPE  # not a recipe
+    assert cropped["render_key"] == pipeline.key_for(RECIPE, client.app.state.settings.get(), CROP)
+    frame = _decode(client.get(cropped["render_url"]).content)
+    assert not np.any(frame == WHITE) or (frame == WHITE).mean() < 0.02  # no bars
+    assert np.array_equal(frame, _direct_cropped(data_dir, photo, RECIPE, CROP))
+    assert client.get(f"/api/photos/{pid}").json() == cropped
+    assert client.get("/api/photos").json()["photos"][0]["crop"] == CROP
+    assert calls == [("invalidate", pid)]
+    # the old render was pruned: only the current one is kept after a crop change
+    assert {p.stem for p in renders.glob("*.png")} == {cropped["render_key"]}
+    # the bare render URL serves the cropped frame now
+    assert np.array_equal(_decode(client.get(f"/api/photos/{pid}/render").content), frame)
+
+    # another crop: a new key, bytes differ, the previous file pruned
+    r = client.put(f"/api/photos/{pid}/crop", json={**CROP, "y": 0.0})
+    assert r.status_code == 200
+    top = r.json()
+    assert top["render_key"] not in {plain_key, cropped["render_key"]}
+    assert not np.array_equal(_decode(client.get(top["render_url"]).content), frame)
+    assert {p.stem for p in renders.glob("*.png")} == {top["render_key"]}
+    assert calls == [("invalidate", pid)] * 2
+
+    # reset: letterboxed again under the original key
+    r = client.put(f"/api/photos/{pid}/crop", json={"reset": True})
+    assert r.status_code == 200
+    back = r.json()
+    assert back["crop"] is None and back["render_key"] == plain_key and back["render_ready"]
+    assert np.array_equal(_decode(client.get(back["render_url"]).content), plain)
+    assert calls == [("invalidate", pid)] * 3
+    # the frame on the panel: the crop change marks it stale
+    _show_on_panel(client, pid)
+    assert client.put(f"/api/photos/{pid}/crop", json=CROP).status_code == 200
+    assert _panel_stale(client) is True
+
+
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        ({}, "crop.x is required"),
+        ({"reset": False}, "crop.x is required"),
+        ({"x": 0, "y": 0, "w": 1}, "crop.h is required"),
+        ({**CROP, "rotate": 90}, "unknown key(s): rotate"),
+        ({**CROP, "x": "0"}, "crop.x must be a finite number"),
+        ({**CROP, "w": None}, "crop.w must be a finite number"),
+        ({**CROP, "y": -0.1}, "crop.y must be at least 0"),
+        ({**CROP, "h": 0}, "crop.h must be greater than 0"),
+        ({**CROP, "x": 0.5}, "crop.x + crop.w must be at most 1"),
+        ({**CROP, "y": 0.6}, "crop.y + crop.h must be at most 1"),
+        ({"x": 0, "y": 0, "w": 1, "h": 1}, "crop: aspect must be 3:2"),
+        ({"x": 0, "y": 0, "w": 0.05, "h": 0.0222}, "crop: at least 150 x 100 master pixels"),
+        ({"reset": "yes"}, "reset must be true or false"),
+        ({"reset": True, "x": 0}, "reset cannot be combined with crop fields"),
+    ],
+)
+def test_crop_put_422_stores_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], fragment: str
+) -> None:
+    photo = upload(client, jpeg_bytes(_portrait_quadrants())).json()
+    pid = photo["id"]
+    calls = _spy_scheduler(client, monkeypatch)
+    r = client.put(f"/api/photos/{pid}/crop", json=body)
+    assert r.status_code == 422, (body, r.text)
+    assert fragment in r.json()["error"], (body, r.json())
+    assert set(r.json()) == {"error"}
+    after = client.get(f"/api/photos/{pid}").json()
+    assert after == photo and after["crop"] is None
+    assert calls == []
+
+
+def test_crop_put_non_object_and_body_cap(client: TestClient) -> None:
+    pid = upload(client, jpeg_bytes(_portrait_quadrants())).json()["id"]
+    assert client.put(f"/api/photos/{pid}/crop", json=[0, 0, 1, 1]).status_code == 422
+    pad = b"x" * (2 * 1024 * 1024)
+    body = b'{"x": 0, "y": 0.2778, "w": 1, "h": 0.4444, "pad": "' + pad + b'"}'
+    r = client.put(
+        f"/api/photos/{pid}/crop", content=body, headers={"content-type": "application/json"}
+    )
+    assert r.status_code == 413 and r.json() == {"error": "request body too large (limit 1 MB)"}
+    assert client.get(f"/api/photos/{pid}").json()["crop"] is None
+
+
+def test_previews_with_a_crop_override(client: TestClient, data_dir: Path) -> None:
+    photo = upload(client, jpeg_bytes(_portrait_quadrants())).json()
+    pid = photo["id"]
+    settings = client.app.state.settings.get()
+    r = client.post(
+        f"/api/photos/{pid}/previews", json={"methods": ["none", "atkinson"], "crop": CROP}
+    )
+    assert r.status_code == 200, r.text
+    previews = {p["method"]: p for p in r.json()["previews"]}
+    assert set(previews) == {"none", "atkinson"}
+    for method, p in previews.items():
+        recipe = {**RECIPE, "method": method}
+        assert p["key"] == pipeline.key_for(recipe, settings, CROP)
+        got = _decode(client.get(p["url"]).content)
+        assert np.array_equal(got, _direct_cropped(data_dir, photo, recipe, CROP)), method
+    # the photo itself is untouched, and its own render survived the prune
+    after = client.get(f"/api/photos/{pid}").json()
+    assert after["crop"] is None and after["render_key"] == photo["render_key"]
+    assert client.get(photo["render_url"]).status_code == 200
+    # saving the crop finds the preview's render: the key is the same
+    saved = client.put(f"/api/photos/{pid}/crop", json=CROP).json()
+    assert saved["render_key"] == previews["atkinson"]["key"]
+    # "crop": null means the photo's own crop (the stored one, now)
+    r = client.post(f"/api/photos/{pid}/previews", json={"methods": ["atkinson"], "crop": None})
+    assert r.json()["previews"][0]["key"] == saved["render_key"]
+    # a bad crop is a 422 naming the field, like PUT
+    for crop, fragment in (
+        ({"x": 0}, "crop.y is required"),
+        ([0, 0, 1, 1], "crop must be an object"),
+        ({"x": 0, "y": 0, "w": 1, "h": 1}, "crop: aspect"),
+    ):
+        r = client.post(f"/api/photos/{pid}/previews", json={"crop": crop})
+        assert r.status_code == 422 and fragment in r.json()["error"], crop
+
+
+def test_master_jpeg(client: TestClient, data_dir: Path) -> None:
+    photo = upload(client, jpeg_bytes(_portrait_quadrants())).json()
+    pid = photo["id"]
+    r = client.get(f"/api/photos/{pid}/master.jpg")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert r.headers["cache-control"] == "private, max-age=3600"
+    etag = r.headers["etag"]
+    assert etag.startswith('"') and etag.endswith('"')
+    with Image.open(io.BytesIO(r.content)) as im:
+        assert im.format == "JPEG" and im.size == (800, 1200)  # long side 1200, never upscaled
+        a = np.asarray(im.convert("RGB"))
+    assert abs(int(a[10, 10, 0]) - 220) < 20 and abs(int(a[1190, 790, 2]) - 40) < 20
+    # a matching If-None-Match is a 304 with the same validators and no body
+    r2 = client.get(f"/api/photos/{pid}/master.jpg", headers={"If-None-Match": etag})
+    assert r2.status_code == 304 and r2.content == b""
+    assert r2.headers["etag"] == etag and r2.headers["cache-control"] == "private, max-age=3600"
+    url = f"/api/photos/{pid}/master.jpg"
+    assert client.get(url, headers={"If-None-Match": "W/" + etag}).status_code == 304
+    assert client.get(url, headers={"If-None-Match": f'"nope", {etag}'}).status_code == 304
+    assert client.get(url, headers={"If-None-Match": '"nope"'}).status_code == 200
+    # the size cap: the ETag changes with it, and the bounds are 200..2400
+    r3 = client.get(f"/api/photos/{pid}/master.jpg?max=300")
+    assert r3.status_code == 200 and r3.headers["etag"] != etag
+    with Image.open(io.BytesIO(r3.content)) as im:
+        assert im.size == (200, 300)
+    big = client.get(f"/api/photos/{pid}/master.jpg?max=2400")
+    with Image.open(io.BytesIO(big.content)) as im:
+        assert im.size == (1200, 1800)  # the master itself is 1800 on its long side
+    for bad in ("10", "199", "2401", "abc", "-5"):
+        r = client.get(f"/api/photos/{pid}/master.jpg?max={bad}")
+        assert r.status_code == 422 and "error" in r.json(), bad
+    # a missing master is a 404, like the render
+    (data_dir / "masters" / f"{pid}.jpg").unlink()
+    assert client.get(f"/api/photos/{pid}/master.jpg").status_code == 404
+    assert client.get(url, headers={"If-None-Match": etag}).status_code == 404
+
+
+def test_master_jpeg_is_made_on_the_render_executor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: set[str] = set()
+    real = photos_api._master_jpeg_job
+
+    def job(*a: Any, **kw: Any) -> Any:
+        threads.add(threading.current_thread().name)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(photos_api, "_master_jpeg_job", job)
+    pid = upload(client, jpeg_bytes(Image.new("RGB", (90, 60)))).json()["id"]
+    r = client.get(f"/api/photos/{pid}/master.jpg")
+    assert r.status_code == 200
+    with Image.open(io.BytesIO(r.content)) as im:
+        assert im.size == (90, 60)
+    assert threads and all(n.startswith("render") for n in threads), threads
+    # a 304 never reaches the executor
+    threads.clear()
+    not_modified = client.get(
+        f"/api/photos/{pid}/master.jpg", headers={"If-None-Match": r.headers["etag"]}
+    )
+    assert not_modified.status_code == 304 and threads == set()
+
+
 # --- recipe changes reach the scheduler ------------------------------------------------------
 
 
@@ -487,8 +706,11 @@ def test_unknown_or_malformed_ids_are_404(client: TestClient, path: str) -> None
     assert client.get(path).status_code == 404
     assert client.get(path).json()["error"]
     assert client.get(path + "/render").status_code == 404
+    assert client.get(path + "/master.jpg").status_code == 404
     assert client.post(path + "/previews", json={}).status_code == 404
     assert client.put(path + "/recipe", json={"gamma": 1.1}).status_code == 404
+    assert client.put(path + "/crop", json=CROP).status_code == 404
+    assert client.put(path + "/crop", json={"reset": True}).status_code == 404
     assert client.put(path + "/flags", json={"excluded": True}).status_code == 404
     assert client.delete(path).status_code == 404
 

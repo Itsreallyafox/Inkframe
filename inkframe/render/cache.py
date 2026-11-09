@@ -14,8 +14,8 @@ browser forever.  Each PNG is a 4-bit paletted (``"P"``) image of 600 x 400:
   shows what the panel shows.  That mapping is informational only: reading a
   render back (``get``) uses the indices and ignores the colours.
 
-Invalidation: a recipe or palette change produces a new key, so stale files
-are simply never asked for again.  ``prune`` keeps at most
+Invalidation: a recipe, palette or crop change produces a new key, so stale
+files are simply never asked for again.  ``prune`` keeps at most
 ``MAX_RENDERS_PER_PHOTO`` files per photo (oldest written go first, the
 photo's current render never), and ``invalidate`` drops a photo's directory
 when the photo is deleted.  Writes are atomic (temp file + rename), every
@@ -33,7 +33,7 @@ import re
 import shutil
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -253,10 +253,18 @@ class RenderCache:
         return True
 
     # --- rendering ---------------------------------------------------------------------
-    def _loader(self, master_loader: MasterLoader | None) -> MasterLoader:
+    @staticmethod
+    def _crop(photo: Photo, crop: pipeline.Crop | None) -> pipeline.Crop | None:
+        """The crop a render uses: the override when given, else the photo's."""
+        return photo.crop if crop is None else crop
+
+    def _loader(
+        self, master_loader: MasterLoader | None, crop: pipeline.Crop | None
+    ) -> MasterLoader:
         if master_loader is not None:
             return master_loader
-        return lambda photo: pipeline.load_fit(photo, self.paths)
+        # the LRU keys fits by the crop, so an override is a photo with that crop
+        return lambda photo: pipeline.load_fit(replace(photo, crop=crop), self.paths)
 
     def render_or_get(
         self,
@@ -264,26 +272,29 @@ class RenderCache:
         recipe: Any,
         settings: Settings,
         master_loader: MasterLoader | None = None,
+        crop: pipeline.Crop | None = None,
     ) -> Rendered:
         """The frame for ``photo`` under ``recipe`` (``None``: its effective
-        recipe): from disk, or rendered now and stored.
+        recipe) and its crop (``photo.crop``, or ``crop`` to render another
+        one, e.g. a crop not saved yet): from disk, or rendered now and stored.
 
         ``master_loader(photo)`` returns the fitted master (default: the
-        pipeline's LRU-backed ``load_fit``).  Raises ``RecipeError``,
-        ``MasterMissing`` or the dither engine's errors.  CPU-heavy on a miss:
-        call it from the render executor.
+        pipeline's LRU-backed ``load_fit`` with the crop).  Raises
+        ``RecipeError``, ``MasterMissing`` or the dither engine's errors.
+        CPU-heavy on a miss: call it from the render executor.
         """
         if recipe is None:
             r = pipeline.effective_recipe(photo, settings)
         else:
             r = pipeline.complete_recipe(recipe)
+        crop = self._crop(photo, crop)
         render_palette = pipeline.resolve_render_palette(r, settings)
         measured = settings.measured_palette()
-        key = pipeline.recipe_key(r, render_palette, measured)
+        key = pipeline.recipe_key(r, render_palette, measured, crop=crop)
         hit = self.get(photo.id, key)
         if hit is not None:
             return Rendered(key, hit, True, r)
-        fit = self._loader(master_loader)(photo)
+        fit = self._loader(master_loader, crop)(photo)
         frame = pipeline.render_frame(fit, r, render_palette)
         self.put(photo.id, key, frame, measured)
         return Rendered(key, frame, False, r)
@@ -295,25 +306,28 @@ class RenderCache:
         settings: Settings,
         methods: Sequence[DitherMethod] = METHODS,
         master_loader: MasterLoader | None = None,
+        crop: pipeline.Crop | None = None,
     ) -> list[MethodRender]:
         """Ensure a render exists for every method with ``recipe``'s other
-        knobs (the editor's method strip).  The master is fitted and adjusted
-        at most once for the whole set.  A cached method costs one read and
-        decode of its PNG: a corrupt or foreign file under its key is removed
-        and rendered again, since a preview key is not the photo's current
-        one and its URL could not re-render it later."""
+        knobs (the editor's method strip) and the photo's crop (or ``crop``,
+        as for ``render_or_get``).  The master is fitted and adjusted at most
+        once for the whole set.  A cached method costs one read and decode of
+        its PNG: a corrupt or foreign file under its key is removed and
+        rendered again, since a preview key is not the photo's current one
+        and its URL could not re-render it later."""
         base = pipeline.complete_recipe(recipe)
+        crop = self._crop(photo, crop)
         render_palette = pipeline.resolve_render_palette(base, settings)
         measured = settings.measured_palette()
         prepared: pipeline.Prepared | None = None
         out: list[MethodRender] = []
         for method in methods:
             r = {**base, "method": method.id}
-            key = pipeline.recipe_key(r, render_palette, measured)
+            key = pipeline.recipe_key(r, render_palette, measured, crop=crop)
             cached = self.get(photo.id, key) is not None
             if not cached:
                 if prepared is None:
-                    fit = self._loader(master_loader)(photo)
+                    fit = self._loader(master_loader, crop)(photo)
                     prepared = pipeline.prepare(pipeline.as_fit(fit, None), base)
                 frame = pipeline.dither_prepared(prepared, r, render_palette)
                 self.put(photo.id, key, frame, measured)

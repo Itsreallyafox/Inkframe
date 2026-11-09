@@ -6,7 +6,9 @@ so it is always the last step and always at the panel's exact 600 x 400:
 1. **fit** (``fit_image``): scale the master to fit inside 600 x 400 keeping
    its aspect (Lanczos, up or down), centre it on white ``(255, 255, 255)``.
    Portrait photos are letterboxed too, never rotated.  The result is a
-   ``Fit``: the 600 x 400 RGB canvas plus the box the photo occupies.
+   ``Fit``: the 600 x 400 RGB canvas plus the box the photo occupies.  With
+   a **crop** (``Photo.crop``, a 3:2 region of the master as fractions) the
+   region is cut out first and resized to exactly 600 x 400: no bars.
 2. **adjust** (``inkframe.render.adjust``): brightness, contrast, saturation,
    gamma, sharpen, applied to the photo inside the box only.
 3. **dither** (``inkframe.render.dither``): the adjusted photo against the
@@ -21,14 +23,16 @@ against the dither registry.  ``recipe_key`` content-addresses a render: a
 16-hex sha256 prefix over the canonical JSON of the recipe, the palette that
 is dithered against, the palette the PNG is coloured with,
 ``FORMAT_VERSION`` and ``engine_version()`` (the native engine's ABI and a
-digest of its source and blue-noise texture).  The master is not part of the
-key because renders live in a per-photo directory and masters never change:
+digest of its source and blue-noise texture), plus the crop when there is
+one (an uncropped photo's key is what it was before crops existed, so the
+renders already on disk stay valid).  The master is not part of the key
+because renders live in a per-photo directory and masters never change:
 ``masters.ingest`` refuses to overwrite one, and a deleted photo's renders
 are deleted with it.
 
 Fits are memoised in a small in-process LRU (``FIT_CACHE_SIZE`` entries,
-keyed by photo id and the master's mtime and size) so a preview set, or a
-preview followed by a save, decodes and resizes the master once.
+keyed by photo id, the master's mtime and size and the crop) so a preview
+set, or a preview followed by a save, decodes and resizes the master once.
 
 Everything here is CPU-heavy; callers run it on the render executor.
 """
@@ -39,6 +43,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -78,9 +83,20 @@ FIT_CACHE_SIZE = 4
 #: distinct "ignoring a stored knob" warnings logged once each (a list of
 #: photos resolves the same default recipe once per photo)
 _WARN_ONCE_MAX = 256
+#: a crop's aspect in master pixels may differ from 3:2 by this fraction
+#: (the resize to 600 x 400 absorbs it; 1 percent is invisible)
+CROP_ASPECT_TOLERANCE = 0.01
+#: the smallest crop, in master pixels (a quarter of the panel's width)
+CROP_MIN_WIDTH = 150
+CROP_MIN_HEIGHT = 100
+CROP_KEYS = ("x", "y", "w", "h")
+#: decimals a crop fraction is stored with (1/10000 of an 1800 px master is
+#: 0.18 px, far below anything the box can be dragged by)
+CROP_DECIMALS = 4
 
 Box = tuple[int, int, int, int]
 FULL_BOX: Box = (0, 0, PANEL_WIDTH, PANEL_HEIGHT)
+Crop = Mapping[str, float]
 
 
 class RecipeError(ValueError):
@@ -188,22 +204,32 @@ def resolve_render_palette(recipe: Mapping[str, Any], settings: Settings) -> Pal
 
 
 def recipe_key(
-    recipe: Mapping[str, Any], render_palette: Palette, measured_palette: Palette
+    recipe: Mapping[str, Any],
+    render_palette: Palette,
+    measured_palette: Palette,
+    *,
+    crop: Crop | None = None,
 ) -> str:
     """The render cache key: 16 hex characters of sha256 over the canonical
     JSON of the complete recipe, the palette dithered against, the palette
-    the PNG is coloured with, ``FORMAT_VERSION`` and ``engine_version()``.
+    the PNG is coloured with, ``FORMAT_VERSION`` and ``engine_version()``,
+    and the crop (``{x, y, w, h}``) when there is one.
 
-    Equal inputs give equal keys whatever the dict order; any knob or palette
-    change gives a new key.  Raises ``RecipeError`` for an invalid recipe.
+    Equal inputs give equal keys whatever the dict order; any knob, palette
+    or crop change gives a new key.  The payload carries ``"crop"`` only for
+    a cropped photo, so every key of an uncropped photo is exactly what it
+    was before crops existed and the renders on disk stay valid.  Raises
+    ``RecipeError`` for an invalid recipe.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "format": FORMAT_VERSION,
         "engine": engine_version(),
         "recipe": complete_recipe(recipe),
         "dither_palette": [list(c) for c in render_palette.rgb],
         "png_palette": [list(c) for c in measured_palette.rgb],
     }
+    if crop is not None:
+        payload["crop"] = {k: float(crop[k]) for k in CROP_KEYS}
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:KEY_LENGTH]
 
@@ -224,9 +250,81 @@ def engine_version() -> str:
     return f"{dither_engine.ABI_VERSION}:{digest.hexdigest()[:16]}"
 
 
-def key_for(recipe: Mapping[str, Any], settings: Settings) -> str:
+def key_for(recipe: Mapping[str, Any], settings: Settings, crop: Crop | None = None) -> str:
     """``recipe_key`` with the palettes ``settings`` resolve for ``recipe``."""
-    return recipe_key(recipe, resolve_render_palette(recipe, settings), settings.measured_palette())
+    return recipe_key(
+        recipe, resolve_render_palette(recipe, settings), settings.measured_palette(), crop=crop
+    )
+
+
+# --- crops -----------------------------------------------------------------------------
+
+
+def validate_crop(crop: object, width: int, height: int) -> dict[str, float]:
+    """``crop`` (``{x, y, w, h}`` fractions of a ``width`` x ``height`` master)
+    checked and normalised: exactly those keys, finite numbers, ``x, y >= 0``,
+    ``w, h > 0``, inside the image, a 3:2 region in master pixels within
+    ``CROP_ASPECT_TOLERANCE``, at least ``CROP_MIN_WIDTH`` x ``CROP_MIN_HEIGHT``
+    master pixels.  The fractions are rounded to ``CROP_DECIMALS`` first, so
+    what is stored is what was validated.  Raises ``ValueError`` naming the
+    field (``crop.w must be ...``, ``crop: aspect ...``)."""
+    if not isinstance(crop, Mapping):
+        raise ValueError(f"crop must be an object with x, y, w, h, got {type(crop).__name__}")
+    unknown = sorted(str(k) for k in crop if k not in CROP_KEYS)
+    if unknown:
+        raise ValueError(f"crop has unknown key(s): {', '.join(unknown)}")
+    out: dict[str, float] = {}
+    for k in CROP_KEYS:
+        if k not in crop:
+            raise ValueError(f"crop.{k} is required")
+        v = crop[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"crop.{k} must be a finite number, got {v!r}")
+        out[k] = round(float(v), CROP_DECIMALS)
+    for k in ("x", "y"):
+        if out[k] < 0:
+            raise ValueError(f"crop.{k} must be at least 0, got {out[k]}")
+    for k in ("w", "h"):
+        if out[k] <= 0:
+            raise ValueError(f"crop.{k} must be greater than 0, got {out[k]}")
+    if out["x"] + out["w"] > 1 + 1e-6:
+        raise ValueError(f"crop.x + crop.w must be at most 1, got {out['x'] + out['w']:.4f}")
+    if out["y"] + out["h"] > 1 + 1e-6:
+        raise ValueError(f"crop.y + crop.h must be at most 1, got {out['y'] + out['h']:.4f}")
+    px_w = out["w"] * width
+    px_h = out["h"] * height
+    aspect = px_w / px_h
+    if abs(aspect / 1.5 - 1) > CROP_ASPECT_TOLERANCE:
+        raise ValueError(
+            f"crop: aspect must be 3:2 (1.5) within {CROP_ASPECT_TOLERANCE:.0%}, "
+            f"got {aspect:.3f} ({px_w:.0f} x {px_h:.0f} master pixels)"
+        )
+    if round(px_w) < CROP_MIN_WIDTH or round(px_h) < CROP_MIN_HEIGHT:
+        raise ValueError(
+            f"crop: at least {CROP_MIN_WIDTH} x {CROP_MIN_HEIGHT} master pixels, "
+            f"got {px_w:.0f} x {px_h:.0f}"
+        )
+    return out
+
+
+def crop_box(width: int, height: int, crop: Crop) -> Box:
+    """A crop's box ``(x0, y0, x1, y1)`` in the pixels of a ``width`` x
+    ``height`` master: edges rounded to whole pixels, clamped inside the
+    image, at least 1 x 1."""
+    x0 = round(float(crop["x"]) * width)
+    y0 = round(float(crop["y"]) * height)
+    x1 = round((float(crop["x"]) + float(crop["w"])) * width)
+    y1 = round((float(crop["y"]) + float(crop["h"])) * height)
+    x0 = min(max(0, x0), width - 1)
+    y0 = min(max(0, y0), height - 1)
+    x1 = min(max(x0 + 1, x1), width)
+    y1 = min(max(y0 + 1, y1), height)
+    return (x0, y0, x1, y1)
+
+
+def _crop_key(crop: Crop | None) -> tuple[tuple[str, float], ...] | None:
+    """A crop as a hashable LRU key part (``None`` for no crop)."""
+    return None if crop is None else tuple(sorted((k, float(v)) for k, v in crop.items()))
 
 
 # --- fit -------------------------------------------------------------------------------
@@ -256,10 +354,19 @@ class Fit:
     box: Box
 
 
-def fit_image(master: Image.Image) -> Fit:
+def fit_image(master: Image.Image, crop: Crop | None = None) -> Fit:
     """Scale ``master`` to fit inside 600 x 400 (Lanczos, keeping aspect) and
-    centre it on a white canvas."""
+    centre it on a white canvas.  With a ``crop`` (``{x, y, w, h}`` fractions,
+    see ``validate_crop``) the region is cut out first and resized to exactly
+    600 x 400 (its box is ``FULL_BOX``: no bars); a region that is already
+    600 x 400 is used as it is.  Without a crop the result is byte for byte
+    the letterbox fit of 0.1."""
     rgb = master if master.mode == "RGB" else master.convert("RGB")
+    if crop is not None:
+        region = rgb.crop(crop_box(*rgb.size, crop))
+        if region.size != PANEL_SIZE:
+            region = region.resize(PANEL_SIZE, Image.Resampling.LANCZOS)
+        return Fit(region, FULL_BOX)
     box = fit_geometry(*rgb.size)
     size = (box[2] - box[0], box[3] - box[1])
     content = rgb if rgb.size == size else rgb.resize(size, Image.Resampling.LANCZOS)
@@ -268,9 +375,9 @@ def fit_image(master: Image.Image) -> Fit:
     return Fit(canvas, box)
 
 
-def fit_master(master_image: Image.Image) -> Image.Image:
-    """``fit_image`` without the box: the 600 x 400 letterboxed RGB image."""
-    return fit_image(master_image).image
+def fit_master(master_image: Image.Image, crop: Crop | None = None) -> Image.Image:
+    """``fit_image`` without the box: the 600 x 400 letterboxed (or cropped) RGB image."""
+    return fit_image(master_image, crop).image
 
 
 # --- adjust + dither ----------------------------------------------------------------------
@@ -402,7 +509,8 @@ def master_file(photo: Photo, paths: DataPaths) -> Path:
 
 
 def load_fit(photo: Photo, paths: DataPaths) -> Fit:
-    """The photo's master, fitted; memoised by (photo id, path, mtime, size).
+    """The photo's master, fitted with ``photo.crop``; memoised by (photo id,
+    path, mtime, size, crop).
 
     Raises ``MasterMissing`` if the master file is gone or unreadable.
     """
@@ -411,7 +519,7 @@ def load_fit(photo: Photo, paths: DataPaths) -> Fit:
         st = path.stat()
     except FileNotFoundError:
         raise MasterMissing(f"the master of photo {photo.id} is missing ({path})") from None
-    key = (photo.id, str(path), st.st_mtime_ns, st.st_size)
+    key = (photo.id, str(path), st.st_mtime_ns, st.st_size, _crop_key(photo.crop))
     fit = _FITS.get(key)
     if fit is not None:
         return fit
@@ -422,7 +530,7 @@ def load_fit(photo: Photo, paths: DataPaths) -> Fit:
         raise MasterMissing(f"the master of photo {photo.id} is missing ({path})") from None
     except Exception as exc:  # corrupt JPEG, permissions...
         raise MasterMissing(f"the master of photo {photo.id} is unreadable: {exc}") from None
-    fit = fit_image(im)
+    fit = fit_image(im, photo.crop)
     _FITS.put(key, fit)
     return fit
 

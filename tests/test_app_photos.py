@@ -124,6 +124,28 @@ def test_portrait_photo_has_white_bars(
     assert np.all(frame[:, 170:430] == BLACK)
 
 
+def test_cropped_photo_fills_the_panel(
+    tmp_path: Path, database: Database, data_paths: DataPaths, photo_factory: PhotoFactory
+) -> None:
+    """The scheduler shows a cropped photo through the app unchanged: the app
+    reads the cache by the effective key, which now carries ``photo.crop``."""
+    photo = photo_factory(Image.new("RGB", (800, 1200), (20, 20, 20)))
+    plain = P.APP.render(_ctx(tmp_path, database, data_paths, photo.id))
+    assert np.all(plain[:, :166] == WHITE)
+    crop = {"x": 0.0, "y": 0.2333, "w": 1.0, "h": 0.4444}
+    assert database.set_photo_crop(photo.id, crop)
+    frame = P.APP.render(_ctx(tmp_path, database, data_paths, photo.id))
+    assert np.all(frame == BLACK)  # no bars: the chosen band fills the panel
+    settings = Settings()
+    key = pipeline.key_for(RECIPE, settings, crop)
+    assert key != pipeline.key_for(RECIPE, settings)
+    cached = RenderCache(data_paths).get(photo.id, key)
+    assert cached is not None and np.array_equal(frame, cached)
+    # a reset brings the letterbox fit back
+    database.set_photo_crop(photo.id, None)
+    assert np.array_equal(P.APP.render(_ctx(tmp_path, database, data_paths, photo.id)), plain)
+
+
 def test_no_photos_card(tmp_path: Path, database: Database, data_paths: DataPaths) -> None:
     expected = P.no_photos_card(FONTS).to_frame()
     for ctx in (

@@ -28,7 +28,7 @@ inkframe/static/
   js/upload.js      browser-side downscale + XHR upload queue (parallelism 2)
   js/now.js         Now
   js/photos.js      Photos (grid, actions, uploader)
-  js/editor.js      Photo editor
+  js/editor.js      Photo editor (methods, knobs, preview loop, crop tool)
   js/rotation.js    Rotation (photo stream, cards with drag reorder, cycle strip, quiet hours, panel care)
   js/apps.js        Apps (generated settings forms, previews)
   js/settings.js    Settings (palette, display, storage, log, restart)
@@ -60,7 +60,7 @@ hook.
 |---|---|---|
 | Now | `GET /api/status` every 5 s while the tab is visible (paused when hidden), `GET /api/display/frame.png?v=<last_refresh_at>` | `POST /api/display/next`, `/pause`, `/resume` |
 | Photos | `GET /api/photos`, each photo's `render_url`, `GET /api/recipe/default` (method names) | `POST /api/photos` (XHR, multipart), `POST /api/display/show {photo_id}`, `PUT /api/photos/{id}/flags`, `DELETE /api/photos/{id}` |
-| Editor | `GET /api/photos/{id}`, `GET /api/recipe/default` (methods, limits), `POST /api/photos/{id}/previews {knobs, methods}`, `GET /api/photos` (how many photos follow the default) | `PUT /api/photos/{id}/recipe` (knobs, or `{"reset": true}`), `PUT /api/recipe/default`, `POST /api/display/show {photo_id}` |
+| Editor | `GET /api/photos/{id}`, `GET /api/recipe/default` (methods, limits), `POST /api/photos/{id}/previews {knobs, methods, crop}`, `GET /api/photos` (how many photos follow the default), `GET /api/photos/{id}/master.jpg?max=1200` (crop mode; the ETag makes it one download) | `PUT /api/photos/{id}/recipe` (knobs, or `{"reset": true}`), `PUT /api/photos/{id}/crop` (`{x, y, w, h}`, or `{"reset": true}`), `PUT /api/recipe/default`, `POST /api/display/show {photo_id}` |
 | Rotation | `GET /api/rotation` (the photo stream and every app as a card), `GET /api/settings` | `PUT /api/settings {quiet_hours, panel, display}`, then `PUT /api/rotation {photos, apps}` |
 | Apps | `GET /api/apps`, `GET /api/apps/{id}/preview.png?variant=&seed=` | `PUT /api/apps/{id}/settings`, `POST /api/display/show {app_id}` |
 | Settings | `GET /api/settings`, `GET /api/status` (display, storage, uptime), `GET /api/system/logs?n=200`, `GET /api/apps/patterns/preview.png?variant=2` | `PUT /api/settings {palette}` / `{display: {rotation}}`, `POST /api/display/show {"app_id": "patterns", "variant": 2}`, `POST /api/system/restart` |
@@ -164,8 +164,43 @@ re-render with it), and the note under the link says the same.
 The stage is the real 600 x 400 render with `image-rendering: pixelated`;
 zoom is Fit, 1:1 or 2x inside a 3:2 window centred on the detail, panned by
 dragging (mouse) or swiping (touch), with no scrollbars inside the bezel.
-Keys: arrows pick a method, Z cycles zoom, D detail/whole, R refreshes the
-strip, Ctrl/Cmd+S saves, Esc goes back.
+Keys: arrows pick a method, Z cycles zoom, D detail/whole, C crop, R
+refreshes the strip, Ctrl/Cmd+S saves, Esc goes back (or leaves crop mode).
+
+### The crop tool
+
+Crop (the button in the action row, or C) swaps the stage for the master
+(`GET master.jpg?max=1200`, letterboxed inside the 3:2 screen; `.crop-area`
+is sized in percent from the master's shape, so nothing is measured on
+resize) with a 3:2 box over it: a dimmed outside (the box's own spread
+shadow), a 1 px white border with a black outline (the panel's own colour
+tokens), and a 32 px target at each corner drawn as a 12 px square just
+inside the box. The box opens at the stored crop, or at the largest centred
+3:2 box ("fill") when there is none. Pointer events with
+`setPointerCapture` and `touch-action: none`, like the rotation drag: drag
+inside the box to move it (clamped to the picture); drag a corner to resize
+about the opposite corner, the box following whichever axis the pointer
+moved further, kept 3:2 in master pixels (`h = w · W / (1.5 · H)`), never
+smaller than 150 master pixels wide or larger than the picture. Arrow keys
+nudge by 1 percent of the picture (Shift: 5 percent), Enter applies, Esc
+cancels; the box takes focus on entry so the keys work at once, and the
+document handler takes the arrows in crop mode wherever focus is.
+
+The draft is `{x, y, w, h}` to four decimals, exactly what the server
+stores. While it changes, the knob signature carries the effective crop
+(the draft, else the stored one), so the strip previews the draft through
+the ordinary debounce and pump (`POST /previews` with `crop`) and the
+caption's timing is the draft's; the stage itself keeps showing the master
+and the box. The buttons under the stage replace the zoom bar: Apply crop
+(`PUT /crop`, exits crop mode, the stage shows the new render, a toast),
+Cancel (exits; the stored crop's previews are usually still memoised, so
+the strip is back at once), Reset to fit (shown when a crop is stored: `PUT
+{"reset": true}`). After Apply or Reset the memoised preview URLs are
+dropped, since the frame removed the other crops' renders. The draft is not
+part of the recipe's dirty state: Save stays as it was, and leaving the page
+in crop mode loses nothing. The meta line says "cropped" (and drops
+"portrait: letterboxed"); the Photos grid shows a Cropped badge and its
+Portrait badge only while the photo is uncropped.
 
 ## Rotation drag and drop
 

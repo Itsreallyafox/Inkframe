@@ -67,6 +67,7 @@ const ICONS = {
   seed: '<rect x="4" y="4" width="16" height="16" rx="3"/><g fill="currentColor" stroke="none"><circle cx="8.8" cy="8.8" r="1.3"/><circle cx="15.2" cy="15.2" r="1.3"/><circle cx="12" cy="12" r="1.3"/></g>',
   upload: '<path d="M12 15.5V4.5M7.5 9 12 4.5 16.5 9"/><path d="M4.5 15v4.5h15V15"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  crop: '<path d="M6.5 2.5v15h15"/><path d="M2.5 6.5h15v15"/>',
   alert: '<path d="M12 4 21 19.5H3z"/><path d="M12 10v4.5M12 17v.5"/>',
 };
 

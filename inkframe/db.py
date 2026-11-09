@@ -53,6 +53,8 @@ MIGRATIONS: list[str] = [
         value TEXT NOT NULL
     );
     """,
+    # v2: a per-photo crop, JSON {x, y, w, h} as fractions of the master (0.2)
+    "ALTER TABLE photos ADD COLUMN crop TEXT NULL",
 ]
 
 #: the schema version this code expects
@@ -75,7 +77,10 @@ def _dumps(value: Any) -> str:
 
 @dataclass(frozen=True)
 class Photo:
-    """One uploaded photo.  ``recipe`` is ``None`` when it follows the default."""
+    """One uploaded photo.  ``recipe`` is ``None`` when it follows the default;
+    ``crop`` is ``None`` when the photo is letterboxed to fit (the default),
+    else ``{x, y, w, h}`` fractions of the master in 0..1 (4 decimals), a
+    3:2 region that fills the panel (``pipeline.validate_crop``)."""
 
     id: str
     original_name: str
@@ -88,6 +93,7 @@ class Photo:
     #: path of the stored master; Phase 3 stores it relative to the data dir
     master_path: str
     master_bytes: int
+    crop: dict[str, float] | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Photo:
@@ -102,6 +108,7 @@ class Photo:
             recipe=None if row["recipe"] is None else json.loads(row["recipe"]),
             master_path=row["master_path"],
             master_bytes=row["master_bytes"],
+            crop=None if row["crop"] is None else json.loads(row["crop"]),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,6 +123,7 @@ class Photo:
             "recipe": None if self.recipe is None else dict(self.recipe),
             "master_path": self.master_path,
             "master_bytes": self.master_bytes,
+            "crop": None if self.crop is None else dict(self.crop),
         }
 
 
@@ -191,6 +199,7 @@ class Database:
         recipe: Mapping[str, Any] | None = None,
         excluded: bool = False,
         created_at: str | None = None,
+        crop: Mapping[str, float] | None = None,
     ) -> Photo:
         """Insert a photo and return it.  ``photo_id`` defaults to a new id (pass
         one when the master file is named after it); ``portrait`` defaults to
@@ -206,12 +215,13 @@ class Database:
             recipe=None if recipe is None else dict(recipe),
             master_path=str(master_path),
             master_bytes=int(master_bytes),
+            crop=None if crop is None else dict(crop),
         )
         with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO photos (id, original_name, created_at, width, height, portrait,"
-                " excluded, recipe, master_path, master_bytes)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " excluded, recipe, master_path, master_bytes, crop)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     photo.id,
                     photo.original_name,
@@ -223,6 +233,7 @@ class Database:
                     None if photo.recipe is None else _dumps(photo.recipe),
                     photo.master_path,
                     photo.master_bytes,
+                    None if photo.crop is None else _dumps(photo.crop),
                 ),
             )
         return photo
@@ -246,6 +257,12 @@ class Database:
         """Set (or with ``None`` clear) a photo's recipe override.  False if no such photo."""
         value = None if recipe is None else _dumps(dict(recipe))
         return self._update_photo("recipe = ?", (value, photo_id))
+
+    def set_photo_crop(self, photo_id: str, crop: Mapping[str, float] | None) -> bool:
+        """Set (or with ``None`` clear) a photo's crop.  The caller validates it
+        (``pipeline.validate_crop``).  False if no such photo."""
+        value = None if crop is None else _dumps(dict(crop))
+        return self._update_photo("crop = ?", (value, photo_id))
 
     def set_photo_excluded(self, photo_id: str, excluded: bool) -> bool:
         """Exclude or include a photo in rotation.  False if no such photo."""

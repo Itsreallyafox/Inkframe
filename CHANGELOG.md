@@ -2,7 +2,7 @@
 
 All notable changes to Inkframe. One entry per build phase; dates are local (America/New_York).
 
-## 0.2.0 — unreleased
+## 0.2.0 — Inkframe 0.2 (2026-11-09)
 
 - Rotation rework: "N photos in a row, then the cards". `rotation.photos`
   (`enabled`, `in_a_row`, `minutes_each`, `order`) replaces the photos slot
@@ -99,6 +99,31 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
   included. "OFFLINE, DATA FROM ..." is kept for offline mode
   (`INKFRAME_OFFLINE=1`, renders not allowed to use the network), which the
   deployed frame never runs in, so the frame itself no longer shows it.
+- Cropping in the photo editor (opt-in per photo, fit-with-bars stays the
+  default, no rotate). The Crop button (or C) puts a 3:2 box over the whole
+  photo on the stage: drag it to move, drag a corner to resize about the
+  opposite corner (always 3:2 in master pixels, never smaller than 150 x 100
+  of them), arrows nudge by 1 percent (Shift 5), Enter applies, Esc cancels;
+  it works with a finger (pointer capture, `touch-action: none`) and at
+  375 px. The method strip keeps previewing the draft crop through the usual
+  debounce, so the dither of the chosen region is judged before it is saved.
+  Apply crop saves it, Cancel leaves everything as it was, Reset to fit
+  brings the bars back. The crop is stored on the photo row as fractions of
+  the master (`Photo.crop`, `{x, y, w, h}` to four decimals; schema v2 adds
+  the column), never in the recipe: the ten recipe keys are unchanged.
+  `pipeline.fit_image(master, crop)` cuts the region out first and resizes it
+  to exactly 600 x 400 with no bars; without a crop the fit is byte for byte
+  what it was, and the render key carries the crop only when there is one,
+  so every existing render on the Pi keeps its key and nothing re-renders on
+  the upgrade. A crop change marks the panel stale like a recipe change
+  (`Scheduler.invalidate`) and removes the photo's other renders, since they
+  all show a different picture. API: `PUT /api/photos/{id}/crop` (`{x, y, w,
+  h}` or `{"reset": true}`; 422 naming the field, nothing stored), `POST
+  /previews` takes an optional `crop`, and the new `GET
+  /api/photos/{id}/master.jpg?max=1200` (ETag, 304, `private, max-age=3600`)
+  is what the box is drawn over. The photo object gained `crop`; the Photos
+  grid shows a Cropped badge (Portrait only while uncropped) and the editor's
+  meta line says "cropped".
 
 ## 0.1.0 — Phase 8: final review (2026-10-20)
 

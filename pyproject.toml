@@ -4,7 +4,7 @@
 
 [project]
 name = "inkframe"
-version = "0.1.0"
+version = "0.2.0"
 description = "LAN-only six-colour e-ink photo frame for a Raspberry Pi Zero 2 W"
 readme = "README.md"
 requires-python = ">=3.10"
