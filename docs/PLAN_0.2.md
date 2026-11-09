@@ -159,6 +159,9 @@ crypto (`BTC-USD`). It is unofficial, so the app caches 15 minutes, retries once
 shows the last data with a "couldn't update" stamp when it fails. Fallback provider:
 Stooq's free daily CSV (delayed, no key). No key-based provider in this round; the free
 tiers that need a key allow too few calls for a frame. Decided: Yahoo as the default.
+*Built (step C, 2026-11-09): Stooq is no longer a fallback; its CSV URL now sits behind a
+JavaScript browser-verification challenge, so the app degrades to its cache and then an
+"unreachable" card. The retry goes to Yahoo's `query2` host instead.*
 
 **Defaults (decided):** `AAPL, NVDA, GOOG, ^GSPC, ^IXIC, ^DJI, T, F, META, AMD`, with the
 indices labelled S&P 500, Nasdaq and Dow. Ten symbols is one request each per refresh,

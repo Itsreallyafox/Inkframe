@@ -25,7 +25,7 @@ from inkframe.scheduler import local_now
 from tests.conftest import gradient_image, jpeg_bytes
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-APP_IDS = ["photos", "weather", "headlines", "patterns", "quotes", "countdown", "trivia"]
+APP_IDS = ["photos", "weather", "headlines", "patterns", "quotes", "countdown", "trivia", "stocks"]
 
 
 def _png(r) -> Image.Image:

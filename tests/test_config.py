@@ -60,8 +60,9 @@ def test_defaults_match_plan() -> None:
         ("patterns", 2, True),
         ("countdown", 2, True),
         ("trivia", 2, True),
+        ("stocks", 2, True),
     ]
-    assert s.rotation.cycle_minutes() == 32  # 18 min of photos (56 %) + 14 min of cards
+    assert s.rotation.cycle_minutes() == 34  # 18 min of photos (53 %) + 16 min of cards
     assert s.paused is False
 
 
@@ -256,7 +257,7 @@ def test_snapshot_is_immutable() -> None:
     d = s.to_dict()
     d["rotation"]["apps"].clear()
     d["rotation"]["photos"]["order"] = "sequential"
-    assert len(s.rotation.apps) == 6 and s.rotation.photos.order == "shuffle"
+    assert len(s.rotation.apps) == 7 and s.rotation.photos.order == "shuffle"
 
 
 def test_merge_replaces_lists_and_merges_dicts() -> None:
@@ -289,14 +290,14 @@ def test_rotation_partial_dict_patches_the_photo_stream_only() -> None:
     s = Settings().merged({"rotation": {"photos": {"in_a_row": 8}}})
     assert s.rotation.photos == PhotoStream(in_a_row=8, minutes_each=3, order="shuffle")
     assert s.rotation.apps == Settings().rotation.apps
-    assert s.rotation.cycle_minutes() == 38  # 8 x 3 min of photos + 14 min of cards
+    assert s.rotation.cycle_minutes() == 40  # 8 x 3 min of photos + 16 min of cards
 
 
 def test_rotation_apps_default_minutes_and_enabled() -> None:
     s = Settings().merged({"rotation": {"apps": [{"app_id": "weather"}]}})
     assert s.rotation.apps == (AppTurn("weather", enabled=True, minutes=3),)
     off = Settings().merged({"rotation": {"photos": {"enabled": False}}})
-    assert off.rotation.cycle_minutes() == 14
+    assert off.rotation.cycle_minutes() == 16
     assert RotationSettings(apps=()).cycle_minutes() == 18
 
 

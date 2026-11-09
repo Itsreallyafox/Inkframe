@@ -1,0 +1,136 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "AAPL",
+     "exchangeName": "NMS",
+     "fullExchangeName": "NasdaqGS",
+     "instrumentType": "EQUITY",
+     "firstTradeDate": 345479400,
+     "regularMarketTime": 1794235363,
+     "hasPrePostMarketData": true,
+     "gmtoffset": -18000,
+     "timezone": "EST",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 349.71,
+     "regularMarketChangePercent": 2.144,
+     "fulldayPrice": 349.71,
+     "fulldayChange": 7.34,
+     "fulldayChangePercent": 2.144,
+     "fiftyTwoWeekHigh": 355.38,
+     "fiftyTwoWeekLow": 243.42,
+     "regularMarketDayHigh": 350.335,
+     "regularMarketDayLow": 344.78,
+     "regularMarketVolume": 3904967,
+     "longName": "Apple Inc.",
+     "shortName": "Apple Inc.",
+     "chartPreviousClose": 336.64,
+     "priceHint": 2,
+     "currentTradingPeriod": {
+      "pre": {
+       "timezone": "EST",
+       "end": 1794234600,
+       "start": 1794214800,
+       "gmtoffset": -18000
+      },
+      "regular": {
+       "timezone": "EST",
+       "end": 1794258000,
+       "start": 1794234600,
+       "gmtoffset": -18000
+      },
+      "post": {
+       "timezone": "EST",
+       "end": 1794272400,
+       "start": 1794258000,
+       "gmtoffset": -18000
+      }
+     },
+     "dataGranularity": "1d",
+     "range": "1mo"
+    },
+    "timestamp": [
+     1791552600,
+     1791811800,
+     1791898200,
+     1791984600,
+     1792071000,
+     1792157400,
+     1792416600,
+     1792503000,
+     1792589400,
+     1792675800,
+     1792762200,
+     1793021400,
+     1793107800,
+     1793194200,
+     1793280600,
+     1793367000,
+     1793629800,
+     1793716200,
+     1793802600,
+     1793889000,
+     1793975400,
+     1794234600
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "volume": [
+        37881200,
+        25900600,
+        38983800,
+        50061100,
+        39767300,
+        59946400,
+        34573200,
+        35851400,
+        35614100,
+        46898900,
+        39539700,
+        42743600,
+        39984400,
+        35714300,
+        42582100,
+        67841600,
+        64757700,
+        63160000,
+        89637700,
+        75678900,
+        44676300,
+        3904967
+       ],
+       "close": [
+        336.6400146484375,
+        340.9700012207031,
+        341.2699890136719,
+        342.9599914550781,
+        342.0,
+        343.4599914550781,
+        342.94000244140625,
+        339.5,
+        343.989990234375,
+        348.2200012207031,
+        347.7300109863281,
+        343.9100036621094,
+        347.1000061035156,
+        343.8299865722656,
+        348.9100036621094,
+        344.6300048828125,
+        338.32000732421875,
+        331.8999938964844,
+        349.510009765625,
+        344.1700134277344,
+        342.3699951171875,
+        349.7101135253906
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

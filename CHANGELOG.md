@@ -9,7 +9,7 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
   and `rotation.apps` (`app_id`, `enabled`, `minutes`) the app slots; one
   cycle is `in_a_row` photos back to back, then every enabled card once, in
   order (default 6 × 3 min, then weather 3, headlines 3, quotes 2, patterns
-  2, countdown 2, trivia 2: 32 min, 56% photos). The photo run is a count, so a 19 s refresh or a
+  2, countdown 2, trivia 2, stocks 2: 34 min, 53% photos). The photo run is a count, so a 19 s refresh or a
   long floor stretches a photo instead of dropping one (0.1 skipped a change
   that would overrun the slot's minutes), and a show-now of a photo restarts
   the run. The Rotation page gained a Photos section, lists every app as a
@@ -51,12 +51,41 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
   failing, the bundled facts fill in without comment. Settings: `source`
   (`mix` default: bundled on even hours, Wikipedia on odd ones), `categories`
   (an unknown name is a 422 naming the field), `show_source`, `layout`.
+- New Stocks app: prices, day change and a sparkline for up to twelve
+  symbols (default AAPL, NVDA, GOOG, S&P 500, Nasdaq, Dow, T, F, META, AMD),
+  in three layouts (a board of two columns, a hero with the indices large and
+  the stocks in a strip, a 4 x 3 grid of tiles) that rotate by the hour. Up is
+  green, down red, flat black; each sparkline marks its last point in the
+  change colour over a blue baseline at the previous close. The data comes
+  from Yahoo Finance's chart endpoint, which is unofficial and keyless: one
+  request per symbol, all in parallel inside a 9.5 s budget with our
+  User-Agent (Yahoo answers 429 to an empty or a python-httpx one), a
+  transient failure (connection error, 5xx, 429 or a body that is not JSON)
+  retried once after 2 s on the `query2.finance.yahoo.com` host rather than
+  the same one. Quotes are cached 15 minutes; a failed refresh shows the
+  cached quotes with Weather's red "COULDN'T UPDATE, DATA FROM ..." stamp
+  ("OFFLINE, DATA FROM ..." in offline mode), nothing cached is an
+  "unreachable" card naming the provider, a symbol that failed while the
+  others came through shows a dash and "no data". The status line reads
+  `LIVE · 3:42 PM` while the session is open (never past the bell, even when
+  the card comes from the 15-minute cache), `FRI CLOSE · 4:00 PM` at the
+  weekend and `AS OF 4:00 PM` in the evening. The day change is the last
+  price against the previous session's close read from the daily series
+  (Yahoo's `chartPreviousClose` is the close before the requested range, a
+  month back). There is no second provider: Stooq, the fallback the 0.2 plan
+  named, now sits behind a JavaScript browser-verification challenge (its
+  CSV URL returns an HTML page with a proof-of-work script), so it is
+  unusable from the frame. Settings: `symbols` (up to 12, validated with a
+  422 naming the field), `labels` (`SYMBOL=Name`), `range` (1 week, 1 month,
+  3 months), `show_percent`, `layout`. Stocks joins the default app list at
+  2 min after Trivia (a fresh frame's cycle is 34 min, 53% photos); an
+  existing `settings.json` lists it switched off until you enable it.
 - Apps may expose an optional `validate(settings)` hook that
   `PUT /api/apps/<id>/settings` runs after the schema check, for settings
   whose meaning the schema cannot judge (a date string, a list of keys);
-  Countdown and Trivia use it (`apps/base.py`).
-- Both apps join the default app list at 2 min after Patterns (a fresh
-  frame's cycle is 32 min, 56% photos). An existing `settings.json` is not
+  Countdown, Trivia and Stocks use it (`apps/base.py`).
+- Both apps join the default app list at 2 min after Patterns (with Stocks
+  below, a fresh frame's cycle is 34 min, 53% photos). An existing `settings.json` is not
   changed: the Rotation page lists them switched off until you enable them.
   `scripts/render_previews.py` re-renders `docs/previews/` offline (every
   layout of every app plus the named states it knows: one card per Countdown

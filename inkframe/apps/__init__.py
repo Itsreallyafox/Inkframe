@@ -21,6 +21,7 @@ APP_IDS: tuple[str, ...] = (
     "quotes",
     "countdown",
     "trivia",
+    "stocks",
 )
 
 

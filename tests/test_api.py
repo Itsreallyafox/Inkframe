@@ -365,6 +365,7 @@ def test_lifespan_state_and_shutdown(data_dir: Path) -> None:
             "quotes",
             "countdown",
             "trivia",
+            "stocks",
         }
         assert state.render_executor.submit(lambda: 41 + 1).result(timeout=5) == 42
         assert isinstance(state.started_at, datetime) and state.started_at.tzinfo is not None
