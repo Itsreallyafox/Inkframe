@@ -47,12 +47,16 @@ the file to look at. Items leave this list when they are fixed; `CHANGELOG.md` h
 - The 311 bundled quotes were attributed from knowledge, not checked one by one; a few rest on second-hand sources the entry names (`apps/data/quotes.json`).
 - The first render in a process is slow (quotes 0.5 to 0.65 s on the desktop, so seconds on the Pi), and no Phase 5 app was timed on the Pi (`quotes.py`, `patterns.py`).
 - The Patterns, Weather, Headlines and Quotes renders have no golden-image tests, since numpy trig, SIMD and FreeType differ by an ulp or a pixel between platforms (`tests/test_app_*.py`).
+- Countdown's "check the date" / "check the holidays list" cards and Trivia's empty-pool card are kept for settings that reach the database without `PUT /api/apps/<id>/settings` (the API runs each app's `validate` hook and refuses them with a 422), so they are not reachable from the UI (`countdown.py`, `trivia.py`).
+- Countdown shrinks a name before splitting a word and ellipsizes what does not fit even at the smallest size (16 px), so a birthday name or custom label longer than about 40 characters is cut with "…" rather than wrapped in full (`countdown_layouts.fit_block`).
+- Countdown's big number is set in Playfair Display Bold, whose figures are old-style (descending); lining figures would need the `sans` face (`countdown_layouts.py`).
+- Trivia's Wikimedia endpoint was exercised only against a recorded response (`tests/fixtures/trivia/onthisday-11-09.json`), and the 325 bundled facts were written from knowledge; the step B review spot-checked 40 plus the builder's flagged ones and replaced three (`trivia_data.py`, `apps/data/trivia.json`).
 
 ### UI (`inkframe/static/`)
 
 - `panel.show_now_min_seconds` has no UI field, the Rotation view lists every app as a card (switch one off rather than removing it), and there is no in-app light/dark switch (`js/rotation.js`, `app.css`).
 - No automated browser tests: all UI QA was manual in Chromium device emulation at 375/390/768/1280 px (`tests/test_static.py` checks only imports and the 300 KB budget).
-- Screenshots in `docs/ui/` have mixed resolutions, nothing regenerates them or `docs/previews/`, the headlines previews are live data of 19 Oct 2026, and the desktop and storage Settings shots were removed because they showed a Windows home path.
+- Screenshots in `docs/ui/` have mixed resolutions and nothing regenerates them; `scripts/render_previews.py` re-renders `docs/previews/` but works offline, so for Weather and Headlines it draws the no-location and offline cards: their data previews (headlines are live data of 19 Oct 2026) are still hand-made and kept unless those apps are named. The desktop and storage Settings shots were removed because they showed a Windows home path.
 - `/docs` (FastAPI's Swagger page) loads its assets from a CDN, so it only renders with internet (`app.py`).
 
 ### Deploy and scripts (`deploy.ps1`, `install.sh`, `deploy/`)
@@ -80,6 +84,7 @@ the file to look at. Items leave this list when they are fixed; `CHANGELOG.md` h
 - CE0 is left to spidev at exit, unlike the vendor C builds that drive CS low (possible minor back-powering through CS; low priority; `display/epd4in0e.py`).
 - No panel temperature is available from the vendor driver, so none is logged, and `state` reads "asleep" during the ~0.5 s `init()` (`display/epd4in0e.py`).
 - Look at the real panel from 2 m: patterns' 2 px keylines, flow contours and 14 px mono caption; weather's dotted texture and hairline fog; headline and quote type sizes; the test card's 1 px and 2 px line sets.
+- Look at Countdown's motifs on the panel: the Atkinson mixes (orange pumpkin, pink hearts, lavender egg) are tuned against the still-untuned `MEASURED_DEFAULT` (`countdown_art.py`).
 - Test the UI on an iPhone (Safari): `createImageBitmap` orientation, native HEIC decode and the HEIC-in-Chrome fallback, real-touch Rotation drag, long-press on method tiles, input zoom, safe-area insets, the sticky editor stage, two-file upload decode memory.
 - Verify on the Pi: the Restart button's `Restart=always` recovery, `systemctl stop` during a refresh, a `kill -9` during a refresh (the `ExecStopPost` pin safety net), mDNS from the phone.
 - Finish the overnight soak: keep-alive through quiet hours, no leaks.

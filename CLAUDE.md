@@ -76,13 +76,15 @@ is the original plan and is wrong in places (below).
   `render_to_frame`, `AppError`. `apps/__init__.py`: `APP_IDS`, `load_app`. `apps/draw.py` `Canvas`
   (palette-only drawing, thresholded text). `apps/photos.py` (serves cached renders); `weather*.py`
   (Open-Meteo), `headlines*.py` (feedparser), `patterns*.py` (6 families + test card), `quotes*.py`
-  (`data/quotes.json`, ZenQuotes). `fonts/` holds the OFL fonts + `fonts.json`.
+  (`data/quotes.json`, ZenQuotes), `countdown*.py` (12 motifs the app dithers itself against
+  `ctx.measured_palette`, then crisp type; returns indices), `trivia*.py` (`data/trivia.json`,
+  Wikimedia "on this day" feed, day cache). `fonts/` holds the OFL fonts + `fonts.json`.
 - `api/`: `__init__` (Depends accessors, `run_on_render_executor`), `system` (health, status, logs,
   restart), `settings`, `display` (frame.png, next/pause/resume/show), `rotation`, `apps`, `photos`, `recipe`.
 - `static/`: no-build UI. `app.js` hash router; `js/{now,photos,editor,rotation,apps,settings}.js` views;
   `ui.js`, `api.js`, `upload.js` helpers. Budget 300 KB (`tests/test_static.py`).
 - Outside the package: `install.sh`, `deploy.ps1`, `deploy/{bootstrap.ps1, inkframe.service,
-  post-receive-main, sudoers-inkframe}`, `scripts/` (dither builds, stats, blue-noise generator),
+  post-receive-main, sudoers-inkframe}`, `scripts/` (dither builds, stats, blue-noise generator, `render_previews.py` for docs/previews),
   `vendor/waveshare/` (reference only, never imported), `tests/`, `docs/`.
 
 ## Contracts that must not drift
@@ -98,7 +100,9 @@ is the original plan and is wrong in places (below).
 - **App protocol.** Module `inkframe.apps.<id>` exports `APP` with `id, name, description, needs_dither,
   settings_schema (tuple[Field]), variants, render(ctx) -> RGB 600x400 | (400,600) index array`. Register the
   id in `APP_IDS`. `needs_dither=False` apps must emit only `NOMINAL` colours (else a loud `ValueError`).
-  Network/data trouble must produce a card (cache or "offline"), `AppError` only for real failure.
+  Optional `validate(settings)` (countdown, trivia): `PUT /api/apps/<id>/settings` runs it after the schema
+  check; it raises `ValueError` naming the field (-> 422). Network/data trouble must produce a card (cache or
+  "offline"), `AppError` only for real failure.
   `RenderContext` fields: `settings, now, cache_dir, fonts, variant, seed, online, http_timeout,
   measured_palette, db, paths, app_settings, item_id`. Photos reads the global `Settings` from `app_settings`.
 - **Recipe keys** (exactly these ten): `method, serpentine, strength, distance, brightness, contrast,

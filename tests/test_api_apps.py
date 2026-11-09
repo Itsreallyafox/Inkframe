@@ -25,7 +25,7 @@ from inkframe.scheduler import local_now
 from tests.conftest import gradient_image, jpeg_bytes
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-APP_IDS = ["photos", "weather", "headlines", "patterns", "quotes"]
+APP_IDS = ["photos", "weather", "headlines", "patterns", "quotes", "countdown", "trivia"]
 
 
 def _png(r) -> Image.Image:
@@ -110,6 +110,11 @@ def test_weather_location_stays_required(client: TestClient) -> None:
         ("headlines", {"colour": "red"}, "unknown setting"),
         ("weather", {"units": "kelvin"}, "units"),
         ("photos", {"dwell_minutes": 3}, "unknown setting"),
+        # the app's own validate hook, after the schema: meaning, not just type
+        ("countdown", {"holidays": ["xmas"]}, "holidays: unknown event 'xmas'"),
+        ("countdown", {"birthday": "13-01"}, "birthday: the month must be 01-12, got 13"),
+        ("countdown", {"custom_date": "tomorrow"}, "custom_date: use YYYY-MM-DD or MM-DD"),
+        ("trivia", {"categories": ["sports"]}, "categories: unknown category 'sports'"),
     ],
 )
 def test_app_settings_put_validation(
@@ -120,6 +125,24 @@ def test_app_settings_put_validation(
     assert r.status_code == 422
     assert fragment in r.json()["error"]
     assert client.get(f"/api/apps/{app_id}/settings").json() == before
+
+
+def test_app_validate_hook_runs_after_the_schema(client: TestClient) -> None:
+    """An unknown ``holidays`` key is a validation error naming the field (the
+    brief), not a card at render time; good values still save."""
+    r = client.put("/api/apps/countdown/settings", json={"holidays": ["xmas"]})
+    assert r.status_code == 422
+    assert r.json()["error"].startswith("holidays: unknown event 'xmas'; one of new_year")
+    assert client.get("/api/apps/countdown/settings").json()["holidays"] != ["xmas"]
+    # the schema check still comes first, with its own message
+    r = client.put("/api/apps/countdown/settings", json={"holidays": 3})
+    assert r.status_code == 422 and r.json()["error"] == "holidays: expected a list of strings"
+    r = client.put("/api/apps/countdown/settings", json={"holidays": ["easter"], "birthday": ""})
+    assert r.status_code == 200 and r.json()["holidays"] == ["easter"]
+    r = client.put("/api/apps/trivia/settings", json={"categories": ["Space", "food"]})
+    assert r.status_code == 200 and r.json()["categories"] == ["Space", "food"]
+    # apps without a hook are untouched
+    assert client.put("/api/apps/quotes/settings", json={}).status_code == 200
 
 
 def test_app_settings_unknown_app_and_bad_body(client: TestClient) -> None:

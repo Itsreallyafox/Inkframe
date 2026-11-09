@@ -13,7 +13,15 @@ import importlib
 from inkframe.apps.base import App
 
 #: every app id, in the order the Apps page lists them
-APP_IDS: tuple[str, ...] = ("photos", "weather", "headlines", "patterns", "quotes")
+APP_IDS: tuple[str, ...] = (
+    "photos",
+    "weather",
+    "headlines",
+    "patterns",
+    "quotes",
+    "countdown",
+    "trivia",
+)
 
 
 def load_app(app_id: str) -> App:

@@ -74,8 +74,9 @@ def update_app_settings(
     app_id: str, body: Annotated[dict[str, Any], Body()], apps: AppsDep, db: DbDep
 ) -> dict[str, Any]:
     """Merge a partial settings object over the stored one, validate it against
-    the app's schema and save it.  Returns the complete settings; 422 with the
-    reason if anything does not validate (nothing is saved then).
+    the app's schema and the app's own ``validate`` hook (when it has one) and
+    save it.  Returns the complete settings; 422 with the reason if anything
+    does not validate (nothing is saved then).
 
     Only keys the user has set are stored, so a required field left unset
     (e.g. the weather location) keeps prompting instead of being saved empty.
@@ -87,6 +88,11 @@ def update_app_settings(
     merged = {**stored, **body}
     try:
         validated = validate_settings(app.settings_schema, merged)
+        # the schema checks types and choices; an app may check meaning (a date, a
+        # key list) with the same ``ValueError`` naming the field
+        hook = getattr(app, "validate", None)
+        if hook is not None:
+            hook(validated)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     db.set_app_settings(app_id, {k: validated[k] for k in merged})

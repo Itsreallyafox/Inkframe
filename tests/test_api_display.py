@@ -347,6 +347,8 @@ def test_rotation_get(client: TestClient) -> None:
         ("headlines", True, 3),
         ("quotes", True, 2),
         ("patterns", True, 2),
+        ("countdown", True, 2),
+        ("trivia", True, 2),
     ]
     assert body["apps"][0] == {
         "app_id": "weather",
@@ -376,6 +378,8 @@ def test_rotation_get_lists_every_app_and_keeps_unknown_ids(client: TestClient) 
         ("weather", False, 2),
         ("headlines", False, 2),
         ("patterns", False, 2),
+        ("countdown", False, 2),
+        ("trivia", False, 2),
     ]
     assert body["apps"][1]["name"] == "radio" and body["apps"][1]["description"] == ""
     assert body["apps"][2]["name"] == "Weather"
@@ -391,20 +395,30 @@ def test_rotation_get_lists_every_app_and_keeps_unknown_ids(client: TestClient) 
         "weather",
         "headlines",
         "patterns",
+        "countdown",
+        "trivia",
     ]
     # ... while an id that is neither registered nor stored is still refused
     body["apps"].append({"app_id": "television", "enabled": True, "minutes": 2})
     r = client.put("/api/rotation", json={"apps": body["apps"]})
     assert r.status_code == 422
     assert r.json()["error"] == (
-        "apps[5].app_id: unknown app 'television'; known: weather, headlines, patterns, quotes"
+        "apps[7].app_id: unknown app 'television'; "
+        "known: weather, headlines, patterns, quotes, countdown, trivia"
     )
     body["apps"].pop()
     # once the stale row is dropped, saving without it stops accepting it
     body["apps"].pop(1)
     r = client.put("/api/rotation", json={"apps": body["apps"]})
     assert r.status_code == 200, r.text
-    assert [a["app_id"] for a in r.json()["apps"]] == ["quotes", "weather", "headlines", "patterns"]
+    assert [a["app_id"] for a in r.json()["apps"]] == [
+        "quotes",
+        "weather",
+        "headlines",
+        "patterns",
+        "countdown",
+        "trivia",
+    ]
     r = client.put("/api/rotation", json={"apps": [{"app_id": "radio", "minutes": 2}]})
     assert r.status_code == 422 and "apps[0].app_id: unknown app 'radio'" in r.json()["error"]
 
@@ -435,6 +449,8 @@ def test_rotation_put_happy_path(client: TestClient, monkeypatch) -> None:
         ("weather", False, 3),
         ("headlines", False, 2),
         ("patterns", False, 2),
+        ("countdown", False, 2),
+        ("trivia", False, 2),
     ]
     assert out["apps"][0]["name"] == "Quotes" and out["paused"] is True
     assert woken.is_set()
@@ -455,7 +471,14 @@ def test_rotation_put_partial_bodies(client: TestClient) -> None:
     r = client.put("/api/rotation", json={"photos": {"in_a_row": 2}})
     assert r.status_code == 200, r.text
     assert r.json()["photos"] == {**PHOTOS_DEFAULT, "in_a_row": 2}
-    assert [a["app_id"] for a in r.json()["apps"]] == ["weather", "headlines", "quotes", "patterns"]
+    assert [a["app_id"] for a in r.json()["apps"]] == [
+        "weather",
+        "headlines",
+        "quotes",
+        "patterns",
+        "countdown",
+        "trivia",
+    ]
     # apps only: the list is replaced whole, the photo stream untouched
     r = client.put("/api/rotation", json={"apps": [{"app_id": "patterns", "minutes": 9}]})
     assert r.status_code == 200, r.text
@@ -465,6 +488,8 @@ def test_rotation_put_partial_bodies(client: TestClient) -> None:
         ("weather", False, 2),
         ("headlines", False, 2),
         ("quotes", False, 2),
+        ("countdown", False, 2),
+        ("trivia", False, 2),
     ]
     assert client.get("/api/settings").json()["rotation"]["apps"] == [
         {"app_id": "patterns", "enabled": True, "minutes": 9}

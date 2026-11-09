@@ -425,6 +425,8 @@ def _default_app_turns() -> tuple[AppTurn, ...]:
         AppTurn("headlines", minutes=3),
         AppTurn("quotes", minutes=2),
         AppTurn("patterns", minutes=2),
+        AppTurn("countdown", minutes=2),
+        AppTurn("trivia", minutes=2),
     )
 
 

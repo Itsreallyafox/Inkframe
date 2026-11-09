@@ -1,16 +1,23 @@
 """The app plugin contract (plan section 8) and the helpers every app shares.
 
-An app renders one 600 x 400 card for the panel.  Two kinds exist:
+An app renders one 600 x 400 card for the panel.  Three render paths exist:
 
-* ``needs_dither = False`` (weather, headlines, patterns, quotes): the app
-  composes *directly in the six palette colours* using ``inkframe.apps.draw``
-  (flat fills, solid type, no anti-aliasing, no gradients) and returns an RGB
-  ``PIL.Image`` whose pixels are exactly ``NOMINAL`` palette colours, or a
-  ``(400, 600)`` palette-index array.  Dithered text looks terrible on e-ink;
-  flat six-colour layouts look like printed cards.
+* ``needs_dither = False`` (weather, headlines, patterns, quotes, trivia):
+  the app composes *directly in the six palette colours* using
+  ``inkframe.apps.draw`` (flat fills, solid type, no anti-aliasing, no
+  gradients) and returns an RGB ``PIL.Image`` whose pixels are exactly
+  ``NOMINAL`` palette colours, or a ``(400, 600)`` palette-index array.
+  Dithered text looks terrible on e-ink; flat six-colour layouts look like
+  printed cards.
 * ``needs_dither = True`` (photos, or an illustrative element that needs
   tone): the app returns any RGB image and ``render_to_frame`` dithers it
   with a recipe through the Phase 2 engine.
+* ``needs_dither = True`` with the dithering done by the app (countdown): the
+  app draws its illustration in RGB, dithers that region itself with the
+  engine against ``ctx.measured_palette``, sets crisp type on top in flat
+  palette colours and returns a ``(400, 600)`` index array.
+  ``render_to_frame`` validates the array and never dithers it again, so the
+  flag only says the card carries dithered tone.
 
 ``render_to_frame`` is the only entry point the scheduler and the preview
 endpoint use; it turns whatever ``App.render`` returned into a validated
@@ -19,7 +26,10 @@ palette-index frame.
 Settings: each app declares a ``settings_schema`` of ``Field`` objects.  The
 Apps page renders a form from it, ``validate_settings`` coerces and checks
 what comes back, and the app receives the complete, validated dict in
-``RenderContext.settings``.
+``RenderContext.settings``.  An app whose settings mean more than their type
+(a date string, a list of keys) may also expose ``validate(settings)``,
+which ``PUT /api/apps/<id>/settings`` runs after the schema check: it raises
+``ValueError`` naming the field, so a bad value is a 422 rather than a card.
 """
 
 from __future__ import annotations
@@ -380,6 +390,10 @@ class App(Protocol):
 
     def render(self, ctx: RenderContext) -> Image.Image | np.ndarray:
         """Return a 600 x 400 RGB image or a (400, 600) palette-index frame."""
+
+    # Optional, not part of the protocol so ``isinstance`` keeps working for
+    # apps without it: ``validate(settings: Mapping[str, Any]) -> None`` raises
+    # ``ValueError`` naming the field for a value the schema cannot judge.
 
 
 # --- normalisation --------------------------------------------------------------------

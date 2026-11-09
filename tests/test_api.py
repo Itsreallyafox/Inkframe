@@ -357,7 +357,15 @@ def test_lifespan_state_and_shutdown(data_dir: Path) -> None:
         assert state.display is display
         # INKFRAME_SCHEDULER=off (conftest): the scheduler exists, its thread does not run
         assert isinstance(state.scheduler, Scheduler) and not state.scheduler.running
-        assert set(state.apps) == {"photos", "weather", "headlines", "patterns", "quotes"}
+        assert set(state.apps) == {
+            "photos",
+            "weather",
+            "headlines",
+            "patterns",
+            "quotes",
+            "countdown",
+            "trivia",
+        }
         assert state.render_executor.submit(lambda: 41 + 1).result(timeout=5) == 42
         assert isinstance(state.started_at, datetime) and state.started_at.tzinfo is not None
         for sub in ("masters", "renders", "cache"):

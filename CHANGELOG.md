@@ -9,7 +9,7 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
   and `rotation.apps` (`app_id`, `enabled`, `minutes`) the app slots; one
   cycle is `in_a_row` photos back to back, then every enabled card once, in
   order (default 6 × 3 min, then weather 3, headlines 3, quotes 2, patterns
-  2: 28 min, 64% photos). The photo run is a count, so a 19 s refresh or a
+  2, countdown 2, trivia 2: 32 min, 56% photos). The photo run is a count, so a 19 s refresh or a
   long floor stretches a photo instead of dropping one (0.1 skipped a change
   that would overrun the slot's minutes), and a show-now of a photo restarts
   the run. The Rotation page gained a Photos section, lists every app as a
@@ -23,6 +23,44 @@ All notable changes to Inkframe. One entry per build phase; dates are local (Ame
   keep their minutes; the file is rewritten in the new shape at the first
   save, and `PUT /api/settings` still accepts the old list. There is no
   per-card frequency knob: every card shows once per cycle.
+- New Countdown app: the days until the next holiday (New Year's Day,
+  Valentine's Day, St. Patrick's Day, Easter by the Gregorian computus,
+  Memorial Day, the 4th of July, Labor Day, Halloween, Thanksgiving,
+  Christmas), your birthday or a date of your own, each with its own
+  illustration; on the day the card celebrates instead of counting, and from
+  the next day it counts to the next occurrence. Mother's Day and Father's
+  Day are left out on purpose. The motifs are drawn in full colour and
+  dithered by the app itself against the measured palette (Atkinson, so the
+  pastel mixes survive; anything with an edge stays flat), the type is set on
+  top in palette colours and `render_to_frame` takes the index array as is:
+  the third render path, documented in `apps/base.py`. Three layouts
+  (poster, tear-off calendar page, banner) rotate by the hour. Settings:
+  `event`, `holidays`, `birthday`, `birthday_name`, `custom_label`,
+  `custom_date`, `layout`; a malformed date or an unknown `holidays` key is
+  refused by the settings API with a 422 naming the field, and one that
+  reaches the database anyway is a card naming the setting, never an error.
+  Names and labels longer than the column shrink, then are cut with "…"
+  rather than losing words. No network.
+- New Trivia app: a fun fact or a moment from history for today's date, in
+  three layouts (a "Did you know?" poster, an "On this day" list, an index
+  card). 325 bundled facts in nine categories (`apps/data/trivia.json`,
+  written for the frame) work offline and never repeat one of the last 40
+  shown; Wikipedia's "On this day" feed is fetched once a day with our
+  User-Agent, retried once on a transient failure, cached for the day, and
+  every card that shows it carries "Wikipedia · CC BY-SA 4.0"; offline or
+  failing, the bundled facts fill in without comment. Settings: `source`
+  (`mix` default: bundled on even hours, Wikipedia on odd ones), `categories`
+  (an unknown name is a 422 naming the field), `show_source`, `layout`.
+- Apps may expose an optional `validate(settings)` hook that
+  `PUT /api/apps/<id>/settings` runs after the schema check, for settings
+  whose meaning the schema cannot judge (a date string, a list of keys);
+  Countdown and Trivia use it (`apps/base.py`).
+- Both apps join the default app list at 2 min after Patterns (a fresh
+  frame's cycle is 32 min, 56% photos). An existing `settings.json` is not
+  changed: the Rotation page lists them switched off until you enable them.
+  `scripts/render_previews.py` re-renders `docs/previews/` offline (every
+  layout of every app plus the named states it knows: one card per Countdown
+  event and a day-of card, Trivia's "on this day" card from the test fixture).
 - Weather and Headlines retry a transient failure (a connection error or an
   HTTP 5xx) once after 2 s, inside the same time budget; a 4xx, a body that is
   not JSON or a feed that does not parse is not retried. Added after Open-Meteo

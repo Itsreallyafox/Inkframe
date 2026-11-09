@@ -7,7 +7,8 @@ about 19 s per full refresh, no partial refresh). One Python process
 no-build web UI and is the only thing that touches the panel. You upload
 photos from a phone or desktop, pick the dithering method and adjustments that
 look best on the six-colour panel, and decide what the frame cycles through:
-photos, weather, headlines, generative patterns and quotes, with quiet hours.
+photos, weather, headlines, generative patterns, quotes, a countdown to the
+next holiday and trivia, with quiet hours.
 
 There is no authentication. Keep it on a trusted LAN.
 
@@ -212,7 +213,9 @@ so the letterbox bars are exact palette white whatever the recipe.
 
 Each app renders one 600 x 400 card in the six palette colours directly (flat
 fills, thresholded type, no gradients), except Photos, which returns the
-cached dithered render. All have layout variants, cache what they fetch, and
+cached dithered render, and Countdown, whose illustrations are drawn in full
+colour and dithered by the app itself against the measured palette (the type
+on top stays flat). All have layout variants, cache what they fetch, and
 degrade to a cached or "offline" card. Weather and Headlines retry a transient
 failure (a connection error or an HTTP 5xx) once after 2 s, inside the same
 time budget.
@@ -224,10 +227,14 @@ time budget.
 | Headlines | RSS/Atom top stories set like a front page; three layouts. Feeds fetched in parallel (9.5 s cap), cached 15 min; a transient failure (connection error or 5xx) is retried once after 2 s within the same cap; stale data is shown with a red "offline" note. | `feeds` (one URL per line, optional short name before it; default BBC, NYT, Guardian), `count` (3-8), `max_age_hours` (1-72), `mix` (`interleave`/`by_feed`). |
 | Patterns | Generative prints: Truchet, Bauhaus, halftone, flow field, concentric, plus the palette test card. No network. | `family` (`random`, the five, or `test_card`), `density` (1-5), `palette_mood` (`full`, `duotone`, `warm`, `cool`), `caption`. |
 | Quotes | One quotation per refresh, three layouts. 311 bundled public-domain quotes work offline; optional ZenQuotes (`https://zenquotes.io/api/random`) with the attribution their terms require, falling back to the bundled set. | `source` (`local`/`zenquotes`), `tags` (wisdom, nature, courage, humour, love, work, time, art, science, stoic), `length` (`short`/`any`/`long`), `show_source`. |
+| Countdown | The days until the next event, with an illustration per event: New Year's Day, Valentine's Day, St. Patrick's Day, Easter (Western date), Memorial Day, the 4th of July, Labor Day, Halloween, Thanksgiving, Christmas, your birthday and a date of your own (Mother's and Father's Day are left out on purpose). Counts calendar days in the frame's local time; on the day it celebrates instead ("Merry Christmas!"). Three layouts (poster, tear-off calendar page, banner). No network. A malformed date or an unknown holiday key is refused when you save (the message names the setting); a date that is missing for a pinned event is a card asking for it. | `event` (`auto` = the next allowed one, or one event pinned), `holidays` (the keys automatic may pick; default all), `birthday` (`MM-DD`; 02-29 falls on Feb 28 in other years), `birthday_name`, `custom_label`, `custom_date` (`YYYY-MM-DD` once, taking over until it has passed, or `MM-DD` yearly), `layout` (`rotate`, `poster`, `calendar`, `banner`). |
+| Trivia | A fun fact or a moment from history for today's date; three layouts (a "Did you know?" poster, an "On this day" list, an index card). 325 bundled facts in nine categories work offline; Wikipedia's "On this day" feed (Wikimedia REST API, keyless, our User-Agent) is fetched once a day, retried once on a transient failure and cached for the day, and every card that shows it carries the "Wikipedia · CC BY-SA 4.0" line; offline or failing, the bundled facts fill in. | `source` (`mix` default: bundled on even hours, Wikipedia on odd ones; `bundled`; `onthisday`), `categories` (science, space, nature, animals, history, geography, language, numbers, food; empty = all), `show_source`, `layout` (`rotate`, `poster`, `onthisday`, `index`). |
 
 Per-app settings live in the database (`app_settings`), are validated against
-the app's schema (text and list fields have length and count caps), and are
-edited in the Apps view or with `PUT /api/apps/{id}/settings`.
+the app's schema (text and list fields have length and count caps) and, for
+Countdown and Trivia, the app's own check of what the values mean (a date, a
+holiday key, a category name), and are edited in the Apps view or with
+`PUT /api/apps/{id}/settings`.
 
 ## The scheduler and the panel-care rules
 
@@ -284,7 +291,7 @@ whole) and unknown keys are a 422.
 | `palette.use_measured` | `true` | Global switch: when off, every photo renders against the nominal primaries whatever its recipe says. |
 | `default_recipe` | atkinson / 0.85 / lab / measured | The recipe photos follow. |
 | `rotation.photos` | `{enabled: true, in_a_row: 6, minutes_each: 3, order: "shuffle"}` | The photo stream: how many photos show back to back (1-200) and for how long each (1-1440 min). |
-| `rotation.apps` | weather 3, headlines 3, quotes 2, patterns 2 | The cards, in order, each `{app_id, enabled, minutes (1-1440)}`; up to 32, ids unique, `photos` not allowed. One cycle is `in_a_row` photos, then every enabled card once (the default is 28 min, 64% photos). A 0.1 `settings.json` with the old slot list is converted on load (the photos slot's `duration_minutes / dwell_minutes` becomes `in_a_row`, capped at 200, app slots keep their minutes) and saved in the new shape. |
+| `rotation.apps` | weather 3, headlines 3, quotes 2, patterns 2, countdown 2, trivia 2 | The cards, in order, each `{app_id, enabled, minutes (1-1440)}`; up to 32, ids unique, `photos` not allowed. One cycle is `in_a_row` photos, then every enabled card once (the default is 32 min, 56% photos). An app added by an upgrade is listed switched off on the Rotation page until you enable it. A 0.1 `settings.json` with the old slot list is converted on load (the photos slot's `duration_minutes / dwell_minutes` becomes `in_a_row`, capped at 200, app slots keep their minutes) and saved in the new shape. |
 | `paused` | `false` | Rotation paused (keep-alive still runs). |
 
 **Environment variables**
@@ -404,7 +411,7 @@ or they can run the 415 MB Pi out of memory.
 | `test_dither.py`, `dither_reference.py`, `golden/dither_golden.json` | the C engine against a pure-Python spec, properties, 120 golden hashes shared by MSVC and gcc |
 | `test_masters.py`, `test_masters_memory.py`, `test_adjust.py`, `test_pipeline.py` | ingest, hardening and measured memory peaks, adjust, fit/recipe/keys/cache |
 | `test_api*.py`, `test_db.py`, `test_config.py` | HTTP routes, SQLite, settings |
-| `test_apps_base.py`, `test_app_{photos,weather,headlines,patterns,quotes}.py` | the app contract and each app (fixtures in `fixtures/`, never the network) |
+| `test_apps_base.py`, `test_app_{photos,weather,headlines,patterns,quotes,countdown,trivia}.py` | the app contract and each app (fixtures in `fixtures/`, never the network) |
 | `test_scheduler.py`, `test_quiet_hours.py`, `test_scheduler_probe.py` | fake-clock tests of every panel-care rule; `conftest.py` holds `FakeClock`, `Rig`, `FakeApp`, `RecordingDisplay` |
 | `test_static.py` | UI size budget (300 KB) and that every JS import resolves |
 
@@ -420,7 +427,7 @@ or they can run the 415 MB Pi out of memory.
 | `docs/DITHER.md` | fixed-point engine, the 12 methods, accuracy, timings |
 | `docs/UI.md` | views, routing, design |
 | `docs/ROUGH_EDGES.md` | known rough edges still open, and what needs the owner or the hardware |
-| `docs/previews/`, `docs/ui/` | app card and UI screenshots |
+| `docs/previews/`, `docs/ui/` | app card and UI screenshots; `.venv/Scripts/python scripts/render_previews.py [app ...]` re-renders the cards offline (every layout of every app, one card per Countdown event, Trivia's "on this day" card from the test fixture) |
 | `CHANGELOG.md`, `CLAUDE.md` | history; architecture notes for Claude Code sessions |
 | `INKFRAME_PLAN.md` | the original build plan (outside the repo) |
 
@@ -441,6 +448,12 @@ is no licence file.
   (authors who died before 1928 or classical sources in older public-domain translations).
 - **ZenQuotes.** When enabled, quotes come from zenquotes.io; every such card
   carries their required attribution, "Quotes by ZenQuotes.io".
+- **Trivia.** `inkframe/apps/data/trivia.json` holds 325 facts written for the
+  frame in our own words, each naming the institution or reference work it rests on.
+- **Wikipedia.** The "On this day" events come from the Wikimedia REST API
+  (`api.wikimedia.org`, one request a day); the text is CC BY-SA 4.0 and every
+  card that shows it carries "Wikipedia · CC BY-SA 4.0". The fixture under
+  `tests/fixtures/trivia/` is a trimmed real response.
 - **Open-Meteo.** Weather and geocoding come from open-meteo.com's free API,
   whose data is offered under CC BY 4.0; credit it if you share screenshots.
 - **Feeds.** Headlines shows story titles from the feeds you configure
