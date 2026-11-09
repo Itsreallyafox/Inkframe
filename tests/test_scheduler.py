@@ -32,9 +32,28 @@ from inkframe.scheduler import (
     SchedulerState,
     iso,
     pick_next_photo,
-    validate_photo_options,
 )
-from tests.conftest import START, FakeApp, FakeClock, RecordingDisplay, fake_apps, slot
+from tests.conftest import (
+    START,
+    FakeApp,
+    FakeClock,
+    RecordingDisplay,
+    fake_apps,
+    photo_stream,
+    rotation,
+    turn,
+)
+
+#: a photo run of three, 3 minutes each, then a 3-minute card
+PHOTOS_3_THEN_ALPHA = {
+    "rotation": rotation([turn("alpha", 3)], photos=photo_stream(in_a_row=3, minutes_each=3))
+}
+
+
+def photos_only(**stream: object) -> dict[str, object]:
+    """A rotation of the photo stream alone (no cards enabled)."""
+    return {"rotation": rotation([], photos=photo_stream(**stream))}  # type: ignore[arg-type]
+
 
 # --- R1: the refresh floor ----------------------------------------------------------------
 
@@ -188,7 +207,7 @@ def test_failed_first_refresh_leaves_no_white_frame_behind(make_rig) -> None:
 
 
 def test_show_now_bypasses_floor_but_not_minimum(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 60), slot("beta", 60), slot("gamma", 60)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 60), turn("beta", 60), turn("gamma", 60)])})
     rig.tick()
     assert rig.shown_id() == "alpha"
 
@@ -223,7 +242,7 @@ def test_show_now_bypasses_floor_but_not_minimum(make_rig) -> None:
 
 
 def test_show_now_jumps_the_rotation_to_the_apps_slot(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 10), slot("beta", 10), slot("gamma", 10)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 10), turn("beta", 10), turn("gamma", 10)])})
     rig.tick()
     rig.clock.advance(seconds=60)
     rig.sched.show_now(app_id="beta")
@@ -234,7 +253,7 @@ def test_show_now_jumps_the_rotation_to_the_apps_slot(make_rig) -> None:
 
 
 def test_show_now_of_an_app_outside_the_rotation_keeps_timing(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 10), slot("beta", 10, enabled=False)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 10), turn("beta", 10, enabled=False)])})
     rig.tick()
     started = rig.snapshot()["rotation"]["current"]["started_at"]
     rig.clock.advance(seconds=60)
@@ -265,7 +284,7 @@ def test_show_now_validates_ids(make_rig) -> None:
 
 
 def test_show_next_shows_what_snapshot_announced(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 30), slot("beta", 30), slot("gamma", 30)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 30), turn("beta", 30), turn("gamma", 30)])})
     rig.tick()
     rig.clock.advance(seconds=40)
     announced = rig.snapshot()["rotation"]["next"]
@@ -291,7 +310,7 @@ def test_show_now_render_failure_is_recorded_not_retried(make_rig) -> None:
 def test_show_now_during_a_render_counts_down_from_the_refresh(make_rig) -> None:
     """While a render or refresh is in flight, ``fires_at`` is measured from
     the attempt that is about to end, not from the previous one."""
-    rig = make_rig({"rotation": [slot("alpha", 60), slot("beta", 60)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 60), turn("beta", 60)])})
     real = rig.apps["alpha"].render
     seen: dict[str, object] = {}
 
@@ -418,7 +437,7 @@ def test_unreadable_photo_list_skips_the_photos_slot(
     """R6: a photo list that cannot be read (SD-card corruption, a row that
     does not parse) fails the photos slot like a render that raised; planning
     and ``snapshot()`` never raise, and the error is logged once."""
-    rig = make_rig({"rotation": [slot("photos", 5), slot("alpha", 1)]})
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
     rig.add_photo("one.jpg", "2026-10-01T10:00:00.000+00:00")
 
     def broken(include_excluded: bool = True):
@@ -446,7 +465,7 @@ def test_unreadable_photo_list_skips_the_photos_slot(
 
 
 def test_unknown_app_in_rotation_is_skipped(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("ghost", 1), slot("alpha", 1)]})
+    rig = make_rig({"rotation": rotation([turn("ghost", 1), turn("alpha", 1)])})
     rig.tick()
     assert rig.shown_id() == "alpha"
 
@@ -486,8 +505,10 @@ def test_keepalive_is_on_time_when_a_static_repeat_is_due_with_it(make_rig) -> N
     refresh it, so it cannot double as a due keep-alive: the same tick
     re-shows the last frame (it used to wait for another tick, half a second
     later per cycle)."""
-    rig = make_rig({"panel": {"keepalive_hours": 1}, "rotation": [slot("photos", 10)]})
+    rig = make_rig({"panel": {"keepalive_hours": 1}, **photos_only(in_a_row=2, minutes_each=3)})
     rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
+    # the run of two restarts every 6 minutes (silently: one photo), so a
+    # re-entry falls on 13:00, exactly when the keep-alive is due
     refreshes = rig.run_until(START + timedelta(hours=1, minutes=5))
     assert refreshes == [START, START + timedelta(hours=1)]
     assert rig.source()["type"] == "keepalive"
@@ -528,7 +549,7 @@ def test_keepalive_without_a_frame_shows_another_photo_if_the_current_one_is_gon
     """No frame to re-show and the photo on the panel was deleted: the
     keep-alive shows the photos slot's next photo, not a "no photos" card
     while photos exist."""
-    rig = make_rig({"panel": {"keepalive_hours": 1}, "rotation": [slot("photos", 10)]})
+    rig = make_rig({"panel": {"keepalive_hours": 1}, **photos_only(in_a_row=3, minutes_each=3)})
     a = rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
     b = rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
     rig.tick()
@@ -566,7 +587,11 @@ def test_all_slots_disabled_keepalive_only(make_rig) -> None:
     rig = make_rig({"panel": {"keepalive_hours": 3}})
     rig.tick()
     rig.store.patch(
-        {"rotation": [slot("alpha", 1, False), slot("beta", 1, False), slot("gamma", 1, False)]}
+        {
+            "rotation": rotation(
+                [turn("alpha", 1, False), turn("beta", 1, False), turn("gamma", 1, False)]
+            )
+        }
     )
     rot = rig.snapshot()["rotation"]
     assert rot["current"] is None and rot["next"] is None and rot["next_at"] is None
@@ -578,36 +603,40 @@ def test_all_slots_disabled_keepalive_only(make_rig) -> None:
 
 
 def test_empty_rotation_waits_for_keepalive(make_rig) -> None:
-    rig = make_rig({"rotation": []})
+    rig = make_rig({"rotation": rotation([])})
     assert rig.tick() == MAX_DELAY
     assert rig.shows == 0
 
 
 def test_disabling_the_current_slot_moves_on(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 30), slot("beta", 30), slot("gamma", 30)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 30), turn("beta", 30), turn("gamma", 30)])})
     rig.tick()
-    rig.store.patch({"rotation": [slot("alpha", 30, False), slot("beta", 30), slot("gamma", 30)]})
+    rig.store.patch(
+        {"rotation": rotation([turn("alpha", 30, False), turn("beta", 30), turn("gamma", 30)])}
+    )
     rig.clock.advance(seconds=180)
     rig.tick()
     assert rig.shown_id() == "beta"
 
 
 def test_rotation_edit_follows_the_current_slot(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 30), slot("beta", 30)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 30), turn("beta", 30)])})
     rig.tick()
     started = rig.snapshot()["rotation"]["current"]["started_at"]
-    rig.store.patch({"rotation": [slot("gamma", 30), slot("alpha", 30), slot("beta", 30)]})
+    rig.store.patch(
+        {"rotation": rotation([turn("gamma", 30), turn("alpha", 30), turn("beta", 30)])}
+    )
     rig.clock.advance(seconds=200)
     assert rig.tick() > 1  # alpha's 30 minutes are not over: no refresh
     current = rig.snapshot()["rotation"]["current"]
     assert current["app_id"] == "alpha" and current["started_at"] == started
-    assert rig.sched._state.slot_index == 1
+    assert rig.sched._state.slot_index == 2  # photos is slot 0, gamma 1, alpha 2
 
 
 def test_removed_slot_moves_on_at_the_floor(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 30), slot("beta", 30)]})
+    rig = make_rig({"rotation": rotation([turn("alpha", 30), turn("beta", 30)])})
     rig.tick()
-    rig.store.patch({"rotation": [slot("beta", 30), slot("gamma", 30)]})
+    rig.store.patch({"rotation": rotation([turn("beta", 30), turn("gamma", 30)])})
     rig.clock.advance(seconds=10)
     assert rig.tick() == 170
     rig.clock.advance(seconds=170)
@@ -615,18 +644,27 @@ def test_removed_slot_moves_on_at_the_floor(make_rig) -> None:
     assert rig.shown_id() == "beta"
 
 
-# --- photos ----------------------------------------------------------------------------------
-
-PHOTOS_10 = {
-    "rotation": [
-        slot("photos", 10, dwell_minutes=3, order="shuffle"),
-        slot("alpha", 3),
-    ]
-}
+# --- photos: the count-based run ----------------------------------------------------------------
 
 
-def test_photos_dwell_and_slot_duration(make_rig) -> None:
-    rig = make_rig(PHOTOS_10)
+def _sources(rig, end):
+    """Run ``rig`` until ``end`` and return ``(time, source)`` per refresh."""
+    out = []
+    while rig.clock.now < end:
+        before = rig.shows
+        delay = rig.tick()
+        if rig.shows != before:
+            out.append((rig.clock.now, rig.source()))
+        rig.clock.advance(seconds=delay)
+    return out
+
+
+def test_photo_run_shows_in_a_row_photos_then_the_cards(make_rig) -> None:
+    """Three in a row, 3 minutes each, then alpha, then photos again.  The
+    run is a count: with two photos the third photo of the run is the first
+    one again (shuffle never repeats the photo on the panel while another
+    exists), and the card comes after it, at 9 minutes."""
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
     p1 = rig.add_photo("one.jpg", "2026-10-01T10:00:00.000+00:00")
     p2 = rig.add_photo("two.jpg", "2026-10-02T10:00:00.000+00:00")
 
@@ -634,64 +672,350 @@ def test_photos_dwell_and_slot_duration(make_rig) -> None:
     first = rig.shown_id()
     assert first in (p1.id, p2.id) and rig.source()["type"] == "photo"
     second = {p1.id, p2.id} - {first}
+    assert rig.sched._state.photos_shown == 1
 
     rig.clock.set(START + timedelta(minutes=3))
     rig.tick()
-    assert {rig.shown_id()} == second  # a new photo every dwell
+    assert {rig.shown_id()} == second  # a new photo every ``minutes_each``
     rig.clock.set(START + timedelta(minutes=6))
     rig.tick()
-    assert rig.shown_id() == first
-    assert rig.shows == 3
+    assert rig.shown_id() == first and rig.shows == 3
+    assert rig.sched._state.photos_shown == 3
+    rot = rig.snapshot()["rotation"]
+    assert rot["next"]["app_id"] == "alpha" and rot["next_at"] == iso(START + timedelta(minutes=9))
 
-    # a change at 9 min could not be replaced before 12 min, past the slot's end
     rig.clock.set(START + timedelta(minutes=9))
-    assert rig.tick() == 60
-    assert rig.shows == 3
-
-    rig.clock.set(START + timedelta(minutes=10))
     rig.tick()
     assert rig.shown_id() == "alpha" and rig.shows == 4
     assert rig.snapshot()["rotation"]["current"]["app_id"] == "alpha"
 
-    # and back to photos after alpha's 3 minutes
-    rig.clock.set(START + timedelta(minutes=13))
+    # and a new run after alpha's 3 minutes
+    rig.clock.set(START + timedelta(minutes=12))
     rig.tick()
     assert rig.source()["type"] == "photo"
+    assert rig.sched._state.photos_shown == 1
+
+
+def test_a_19_second_refresh_does_not_cost_a_photo(make_rig) -> None:
+    """Exactly ``in_a_row`` photos show back to back, then every enabled
+    card once in order, then photos again, however long each refresh takes
+    (the old 10-minute slot held three photos at best, sometimes two)."""
+    rig = make_rig(
+        {
+            "rotation": rotation(
+                [turn("alpha", 3), turn("beta", 2), turn("gamma", 2, enabled=False)],
+                photos=photo_stream(in_a_row=6, minutes_each=3),
+            )
+        },
+        show_seconds=19,
+    )
+    for i in range(8):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-{i + 1:02d}T10:00:00.000+00:00")
+    shown = _sources(rig, START + timedelta(minutes=55))
+    kinds = [(src["type"], src["id"]) for _, src in shown]
+    assert [k[0] for k in kinds[:9]] == ["photo"] * 6 + ["app", "app", "photo"]
+    assert [k[1] for k in kinds[6:8]] == ["alpha", "beta"]
+    assert len({k[1] for k in kinds[:6]}) == 6  # six different photos
+    assert "gamma" not in [k[1] for k in kinds]
+    # each photo had its 3 minutes from the END of its own 19 s refresh
+    times = [t for t, _ in shown]
+    gaps = [(b - a).total_seconds() for a, b in zip(times[:6], times[1:7], strict=True)]
+    assert gaps == [180 + 19] * 6
+    # the second run is six photos again
+    assert [k[0] for k in kinds[8:14]] == ["photo"] * 6 and kinds[14][1] == "alpha"
+
+
+def test_the_floor_stretches_a_short_minutes_each(make_rig) -> None:
+    """``minutes_each`` 1 with the default 180 s floor: a photo every 3
+    minutes, and still exactly ``in_a_row`` of them before the card."""
+    rig = make_rig(
+        {"rotation": rotation([turn("alpha", 1)], photos=photo_stream(in_a_row=3, minutes_each=1))}
+    )
+    for i in range(4):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    shown = _sources(rig, START + timedelta(minutes=14))
+    assert [(t - START).total_seconds() / 60 for t, _ in shown] == [0, 3, 6, 9, 12]
+    assert [src["type"] for _, src in shown] == ["photo", "photo", "photo", "app", "photo"]
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=15))
 
 
 def test_photos_status_reports_current_photo_and_next(make_rig) -> None:
-    rig = make_rig(PHOTOS_10)
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
     for i in range(3):
         rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
     rig.tick()
     rot = rig.snapshot()["rotation"]
     shown = rig.shown_id()
     assert rot["current"]["app_id"] == "photos" and rot["current"]["photo_id"] == shown
-    assert rot["current"]["ends_at"] == iso(START + timedelta(minutes=10))
+    # the run's estimated end: three photos of 3 minutes
+    assert rot["current"]["ends_at"] == iso(START + timedelta(minutes=9))
     announced = rot["next"]
     assert announced["app_id"] == "photos" and announced["photo_id"] not in (None, shown)
     assert rot["next_at"] == iso(START + timedelta(minutes=3))
     rig.clock.set(START + timedelta(minutes=3))
     rig.tick()
     assert rig.shown_id() == announced["photo_id"]  # the shuffle pick was reserved
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=9))
+
+
+def test_current_ends_at_estimates(make_rig) -> None:
+    """``ends_at``: a card's exact end; for the photo stream the photos still
+    to come at one dwell each from the current photo's start, which moves
+    when the floor delays a photo; one dwell for the "no photos" card."""
+    rig = make_rig(
+        {
+            "panel": {"refresh_floor_seconds": 240},
+            "rotation": rotation(
+                [turn("alpha", 5)], photos=photo_stream(in_a_row=3, minutes_each=3)
+            ),
+        }
+    )
+    rig.tick()  # no photos: the card
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=3))
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()  # the floor (4 min) holds the change until 12:04
+    assert rig.shown_id() == "photos"
+    rig.clock.set(START + timedelta(minutes=4))
+    rig.tick()
+    assert rig.shown_id() == "alpha"
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=9))
+    for i in range(3):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    rig.clock.set(START + timedelta(minutes=9))
+    rig.tick()  # photo 1 of 3 at 12:09: the run ends about 12:18
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=18))
+    rig.clock.set(START + timedelta(minutes=13))
+    rig.tick()  # photo 2 at 12:13 (the floor): two dwells left from now
+    assert rig.sched._state.photos_shown == 2
+    assert rig.snapshot()["rotation"]["current"]["ends_at"] == iso(START + timedelta(minutes=19))
 
 
 def test_no_photos_card_lasts_one_dwell(make_rig) -> None:
-    rig = make_rig(PHOTOS_10)
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
     rig.tick()
     assert rig.source() == {"type": "app", "id": "photos", "label": "Photos"}
     assert rig.apps["photos"].renders == [None]
+    assert rig.snapshot()["rotation"]["next"]["app_id"] == "alpha"
     rig.clock.set(START + timedelta(minutes=3))
     rig.tick()
     assert rig.shown_id() == "alpha"
 
 
 def test_single_photo_is_not_refreshed_needlessly(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("photos", 10, dwell_minutes=3)]})
+    rig = make_rig(photos_only(in_a_row=3, minutes_each=3))
     rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
     refreshes = rig.run_until(START + timedelta(hours=2))
     assert refreshes == [START]  # same photo, same panel: no pointless flicker
     assert rig.snapshot()["rotation"]["current"]["app_id"] == "photos"
+    assert rig.apps["photos"].renders == [rig.shown_id()]
+
+
+def test_single_photo_run_still_ends_after_in_a_row_dwells(make_rig) -> None:
+    """One photo: every change inside the run is a silent repeat (no
+    refresh), counted all the same, so after ``in_a_row`` dwells the cards
+    show, and the photo is refreshed again only when it follows a card."""
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
+    photo = rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
+    shown = _sources(rig, START + timedelta(minutes=22))
+    assert [((t - START).total_seconds() / 60, src["type"]) for t, src in shown] == [
+        (0, "photo"),
+        (9, "app"),
+        (12, "photo"),
+        (21, "app"),
+    ]
+    assert rig.apps["photos"].renders == [photo.id, photo.id]
+    assert rig.display.calls.count("show") == 4
+
+
+def test_unreadable_photo_list_inside_a_run_moves_on_at_the_next_change(make_rig) -> None:
+    """R6: when the photo list cannot be read mid-run, the photo on the
+    panel stays until its dwell ends, then the next card is entered."""
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
+    rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
+    rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
+    rig.tick()
+    assert rig.source()["type"] == "photo"
+
+    def broken(include_excluded: bool = True):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    real = rig.db.list_photos
+    rig.db.list_photos = broken  # type: ignore[method-assign]
+    rig.clock.set(START + timedelta(minutes=1))
+    assert rig.tick() == 120
+    rot = rig.snapshot()["rotation"]
+    assert rot["next"]["app_id"] == "alpha" and rot["next_at"] == iso(START + timedelta(minutes=3))
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()
+    assert rig.shown_id() == "alpha" and rig.shows == 2
+    rig.db.list_photos = real  # type: ignore[method-assign]
+    rig.clock.set(START + timedelta(minutes=6))
+    rig.tick()
+    assert rig.source()["type"] == "photo" and rig.sched._state.photos_shown == 1
+
+
+def test_show_next_inside_and_after_the_run(make_rig) -> None:
+    """show_next inside the run shows the next photo (and counts it); once
+    the run is complete it shows the first card; after the last card a new
+    run starts."""
+    rig = make_rig(
+        {
+            "rotation": rotation(
+                [turn("alpha", 3), turn("beta", 3)], photos=photo_stream(in_a_row=2, minutes_each=3)
+            )
+        }
+    )
+    for i in range(3):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    rig.tick()
+    first = rig.shown_id()
+    rig.clock.advance(minutes=1)
+    assert rig.snapshot()["rotation"]["next"]["app_id"] == "photos"
+    rig.sched.show_next()
+    rig.tick()
+    assert rig.source()["type"] == "photo" and rig.shown_id() != first
+    assert rig.sched._state.photos_shown == 2
+    rig.clock.advance(minutes=1)
+    assert rig.snapshot()["rotation"]["next"]["app_id"] == "alpha"
+    rig.sched.show_next()
+    rig.tick()
+    assert rig.shown_id() == "alpha"
+    rig.clock.advance(minutes=1)
+    rig.sched.show_next()
+    rig.tick()
+    assert rig.shown_id() == "beta"
+    rig.clock.advance(minutes=1)
+    rig.sched.show_next()
+    rig.tick()
+    assert rig.source()["type"] == "photo" and rig.sched._state.photos_shown == 1
+
+
+def test_show_now_of_a_photo_restarts_the_run(make_rig) -> None:
+    rig = make_rig(PHOTOS_3_THEN_ALPHA)
+    photos = [rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00") for i in range(4)]
+    rig.tick()  # 12:00: photo 1 of 3
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()  # 12:03: photo 2 of 3
+    assert rig.sched._state.photos_shown == 2
+    chosen = next(p for p in photos if p.id not in rig.sched._state.recent_photo_ids)
+    rig.clock.set(START + timedelta(minutes=4))
+    rig.sched.show_now(photo_id=chosen.id)
+    rig.tick()  # 12:04: the chosen photo starts a new run of three
+    assert rig.shown_id() == chosen.id
+    current = rig.snapshot()["rotation"]["current"]
+    assert current["started_at"] == iso(START + timedelta(minutes=4))
+    assert current["ends_at"] == iso(START + timedelta(minutes=13))
+    assert rig.sched._state.photos_shown == 1
+    shown = _sources(rig, START + timedelta(minutes=14))
+    assert [((t - START).total_seconds() / 60, src["type"]) for t, src in shown] == [
+        (7, "photo"),
+        (10, "photo"),
+        (13, "app"),
+    ]
+
+
+def test_photos_disabled_is_cards_only(make_rig) -> None:
+    rig = make_rig(
+        {
+            "rotation": rotation(
+                [turn("alpha", 1), turn("beta", 1)], photos=photo_stream(enabled=False)
+            )
+        }
+    )
+    rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
+    shown = _sources(rig, START + timedelta(minutes=16))
+    assert [src["id"] for _, src in shown] == ["alpha", "beta"] * 3
+    assert rig.apps["photos"].renders == []
+
+
+def test_all_cards_disabled_is_photos_only_with_a_fresh_pick_each_run(make_rig) -> None:
+    """With no card enabled the stream re-enters itself: a new run starts
+    with a fresh pick (shuffle still avoids the recent photos) and
+    ``photos_shown`` restarts at 1."""
+    rig = make_rig(
+        {"rotation": rotation([turn("alpha", 1, enabled=False)], photos=photo_stream(2, 3))}
+    )
+    for i in range(3):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    counts = []
+    ids = []
+    for minute in range(0, 15, 3):
+        rig.clock.set(START + timedelta(minutes=minute))
+        rig.tick()
+        counts.append(rig.sched._state.photos_shown)
+        ids.append(rig.shown_id())
+    assert counts == [1, 2, 1, 2, 1]
+    assert all(a != b for a, b in zip(ids, ids[1:], strict=False))  # always a new picture
+    assert "alpha" not in ids and rig.apps["alpha"].renders == []
+    assert rig.snapshot()["rotation"]["current"]["started_at"] == iso(START + timedelta(minutes=12))
+
+
+def test_lowering_in_a_row_mid_run_ends_the_run_at_the_next_change(make_rig) -> None:
+    rig = make_rig(
+        {"rotation": rotation([turn("alpha", 3)], photos=photo_stream(in_a_row=6, minutes_each=3))}
+    )
+    for i in range(3):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    rig.tick()
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()
+    assert rig.sched._state.photos_shown == 2
+    assert rig.snapshot()["rotation"]["next"]["app_id"] == "photos"
+    rig.store.patch({"rotation": {"photos": {"in_a_row": 1}}})
+    rot = rig.snapshot()["rotation"]
+    assert rot["next"]["app_id"] == "alpha" and rot["next_at"] == iso(START + timedelta(minutes=6))
+    assert rot["current"]["ends_at"] == iso(START + timedelta(minutes=6))
+    rig.clock.set(START + timedelta(minutes=6))
+    rig.tick()
+    assert rig.shown_id() == "alpha"
+
+
+def test_reordering_the_cards_mid_run_keeps_the_run(make_rig) -> None:
+    """A rotation edit during a photo run: the stream is always slot 0, so
+    the run continues with its count and timing; the first card afterwards
+    is the new first card.  A running card is followed by its app id."""
+    rig = make_rig(
+        {
+            "rotation": rotation(
+                [turn("alpha", 3), turn("beta", 3)], photos=photo_stream(in_a_row=2, minutes_each=3)
+            )
+        }
+    )
+    for i in range(3):
+        rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00")
+    rig.tick()
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()
+    started = rig.snapshot()["rotation"]["current"]["started_at"]
+    rig.store.patch(
+        {
+            "rotation": rotation(
+                [turn("beta", 3), turn("alpha", 3)], photos=photo_stream(in_a_row=2, minutes_each=3)
+            )
+        }
+    )
+    current = rig.snapshot()["rotation"]["current"]
+    assert current["app_id"] == "photos" and current["started_at"] == started
+    assert rig.sched._state.photos_shown == 2
+    rig.clock.set(START + timedelta(minutes=6))
+    rig.tick()
+    assert rig.shown_id() == "beta"
+    beta_started = rig.snapshot()["rotation"]["current"]["started_at"]
+    rig.store.patch(
+        {
+            "rotation": rotation(
+                [turn("alpha", 3), turn("gamma", 3), turn("beta", 3)],
+                photos=photo_stream(in_a_row=2, minutes_each=3),
+            )
+        }
+    )
+    current = rig.snapshot()["rotation"]["current"]
+    assert current["app_id"] == "beta" and current["started_at"] == beta_started
+    rig.tick()  # nothing due; the edit is folded into the state
+    assert (rig.sched._state.slot_index, rig.sched._state.slot_app_id) == (3, "beta")
+    rig.clock.set(START + timedelta(minutes=9))
+    rig.tick()
+    assert rig.source()["type"] == "photo"  # beta was the last card: a new run
 
 
 def test_invalidate_repaints_the_same_photo_at_the_next_change(make_rig) -> None:
@@ -699,9 +1023,7 @@ def test_invalidate_repaints_the_same_photo_at_the_next_change(make_rig) -> None
     next rotation change re-render the photo on the panel instead of skipping
     it as "already showing".  It survives a restart, a keep-alive re-show of
     the old frame in between does not clear it, and it applies only once."""
-    rig = make_rig(
-        {"panel": {"keepalive_hours": 1}, "rotation": [slot("photos", 120, dwell_minutes=3)]}
-    )
+    rig = make_rig({"panel": {"keepalive_hours": 1}, **photos_only(in_a_row=1, minutes_each=120)})
     photo = rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
     rig.tick()  # 12:00
     assert rig.sched.invalidate("not-on-the-panel") is False
@@ -709,7 +1031,7 @@ def test_invalidate_repaints_the_same_photo_at_the_next_change(make_rig) -> None
     rig.sched = rig.new_scheduler()  # restart
     refreshes = rig.run_until(START + timedelta(hours=4, minutes=30))
     hours = [START + timedelta(hours=h) for h in (1, 2, 3, 4)]
-    assert refreshes == hours  # keep-alives; the slot's visits at 14:00 and 16:00
+    assert refreshes == hours  # keep-alives; the run restarts at 14:00 and 16:00
     assert rig.apps["photos"].renders == [photo.id, photo.id]  # re-rendered once, at 14:00
     assert rig.sched._state.panel_stale is False
 
@@ -718,9 +1040,7 @@ def test_failed_refresh_of_static_content_is_repaired_at_the_next_change(make_ri
     """After a failed attempt the panel's content is unknown, so the same
     photo is not skipped as "already showing" (the probe in
     test_scheduler_probe.py shows the white panel this left)."""
-    rig = make_rig(
-        {"panel": {"keepalive_hours": 1}, "rotation": [slot("photos", 10, dwell_minutes=3)]}
-    )
+    rig = make_rig({"panel": {"keepalive_hours": 1}, **photos_only(in_a_row=3, minutes_each=3)})
     photo = rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
     rig.tick()  # 12:00
     rig.clock.set(START + timedelta(minutes=5))
@@ -730,12 +1050,13 @@ def test_failed_refresh_of_static_content_is_repaired_at_the_next_change(make_ri
     rig.display.fail_show = False
     assert rig.sched._state.panel_stale is True
     refreshes = rig.run_until(START + timedelta(minutes=45))
-    assert refreshes == [START + timedelta(minutes=10)]
+    # the change due at 12:06 waits for the floor from the failed attempt
+    assert refreshes == [START + timedelta(minutes=8)]
     assert rig.source()["type"] == "photo" and rig.sched._state.panel_stale is False
 
 
 def test_photo_uploaded_while_no_photos_card_shows(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("photos", 10, dwell_minutes=3)]})
+    rig = make_rig(photos_only(in_a_row=3, minutes_each=3))
     rig.tick()
     photo = rig.add_photo("new.jpg", "2026-10-01T10:00:00.000+00:00")
     rig.clock.set(START + timedelta(minutes=3))
@@ -744,7 +1065,7 @@ def test_photo_uploaded_while_no_photos_card_shows(make_rig) -> None:
 
 
 def test_sequential_order_cycles_in_created_at_order(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("photos", 60, dwell_minutes=3, order="sequential")]})
+    rig = make_rig(photos_only(in_a_row=20, minutes_each=3, order="sequential"))
     c = rig.add_photo("c.jpg", "2026-10-03T10:00:00.000+00:00")
     a = rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
     b = rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
@@ -757,7 +1078,7 @@ def test_sequential_order_cycles_in_created_at_order(make_rig) -> None:
 
 
 def test_sequential_order_skips_excluded_and_survives_deletion(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("photos", 60, dwell_minutes=3, order="sequential")]})
+    rig = make_rig(photos_only(in_a_row=20, minutes_each=3, order="sequential"))
     a = rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
     b = rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
     c = rig.add_photo("c.jpg", "2026-10-03T10:00:00.000+00:00")
@@ -775,7 +1096,7 @@ def test_sequential_order_skips_excluded_and_survives_deletion(make_rig) -> None
 
 
 def test_shuffle_avoids_immediate_repeats(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("photos", 600, dwell_minutes=3)]})
+    rig = make_rig(photos_only(in_a_row=60, minutes_each=3))
     ids = {rig.add_photo(f"p{i}.jpg", f"2026-10-0{i + 1}T10:00:00.000+00:00").id for i in range(4)}
     shown = []
     for k in range(40):
@@ -824,56 +1145,186 @@ def test_pick_next_photo_rules() -> None:
     assert pick_next_photo(two, "shuffle", [], rng, current=two[0].id) is two[1]
 
 
-def test_validate_photo_options() -> None:
-    assert validate_photo_options({}) == {"dwell_minutes": 3, "order": "shuffle"}
-    assert validate_photo_options({"dwell_minutes": 5.0, "order": "sequential"}) == {
-        "dwell_minutes": 5,
-        "order": "sequential",
-    }
-    for bad, fragment in (
-        ({"dwell_minutes": 0}, "between 1 and 1440"),
-        ({"dwell_minutes": 1441}, "between 1 and 1440"),
-        ({"dwell_minutes": 2.5}, "whole number"),
-        ({"dwell_minutes": "3"}, "whole number"),
-        ({"dwell_minutes": True}, "whole number"),
-        ({"order": "random"}, "options.order"),
-        ({"speed": 1}, "unknown key"),
-        ([1], "object"),
-    ):
-        with pytest.raises(ValueError, match=fragment):
-            validate_photo_options(bad)
+def _break_photos(apps: dict, *broken: str) -> list[str | None]:
+    """Make the fake photos app raise for the photo ids in ``broken``; returns
+    the list of every render attempt's item id (``FakeApp.renders`` only
+    records the renders that ran)."""
+    real_render = apps["photos"].render
+    attempts: list[str | None] = []
+
+    def render(ctx):
+        attempts.append(ctx.item_id)
+        if ctx.item_id in broken:
+            raise ValueError("corrupt master")
+        return real_render(ctx)
+
+    apps["photos"].render = render  # type: ignore[method-assign]
+    return attempts
+
+
+def _shown_log(rig, end) -> list[str]:
+    """The ids put on the panel, in order, following the delays until ``end``."""
+    out = []
+    while rig.clock.now < end:
+        before = rig.shows
+        delay = rig.tick()
+        if rig.shows != before:
+            out.append(rig.shown_id())
+        rig.clock.advance(seconds=delay)
+    return out
 
 
 def test_broken_photo_is_skipped_and_walked_past(make_rig) -> None:
+    """A photo that fails to render inside the run is left out and the next
+    photo is tried a second later; the run goes on (the stream is not
+    skipped) and the broken photo is tried again in the next run."""
     apps = fake_apps()
     rig = make_rig(
         {
             "panel": {"refresh_floor_seconds": 30},
-            "rotation": [slot("photos", 60, dwell_minutes=3, order="sequential"), slot("alpha", 3)],
+            "rotation": rotation(
+                [turn("alpha", 3)],
+                photos=photo_stream(in_a_row=20, minutes_each=3, order="sequential"),
+            ),
         },
         apps=apps,
     )
     a = rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
     b = rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
     c = rig.add_photo("c.jpg", "2026-10-03T10:00:00.000+00:00")
-    real_render = apps["photos"].render
-
-    def render(ctx):
-        if ctx.item_id == b.id:
-            raise ValueError("corrupt master")
-        return real_render(ctx)
-
-    apps["photos"].render = render  # type: ignore[method-assign]
+    attempts = _break_photos(apps, b.id)
     rig.tick()
     assert rig.shown_id() == a.id
     rig.clock.advance(minutes=3)
-    assert rig.tick() == RETRY_DELAY  # b fails: the slot is skipped
+    assert rig.tick() == RETRY_DELAY  # b fails: left out of this run
+    assert rig.snapshot()["panel"]["last_error"]["app_id"] == "photos"
+    assert rig.snapshot()["rotation"]["current"]["app_id"] == "photos"  # still in the stream
+    rig.clock.advance(seconds=1)
+    rig.tick()
+    assert rig.shown_id() == c.id  # the walk moved past the broken photo at once
+    assert rig.snapshot()["rotation"]["current"]["ends_at"]  # the run goes on
+    rig.clock.advance(minutes=3)
+    rig.tick()
+    assert rig.shown_id() == a.id
+    rig.clock.advance(minutes=3)
+    rig.tick()
+    assert rig.shown_id() == c.id  # b is not tried again in this run
+    assert attempts == [a.id, b.id, c.id, a.id, c.id]
+
+
+def test_a_broken_photo_mid_run_does_not_end_the_run(make_rig) -> None:
+    """in_a_row 4 over a, b, c, d with b corrupt: the run still shows four
+    photos (a, c, d, a) before the card, every cycle."""
+    apps = fake_apps()
+    rig = make_rig(
+        {
+            "panel": {"refresh_floor_seconds": 30},
+            "rotation": rotation(
+                [turn("alpha", 3)],
+                photos=photo_stream(in_a_row=4, minutes_each=3, order="sequential"),
+            ),
+        },
+        apps=apps,
+    )
+    a, b, c, d = (
+        rig.add_photo(f"p{i}.jpg", f"2026-10-{i + 1:02d}T10:00:00.000+00:00").id for i in range(4)
+    )
+    attempts = _break_photos(apps, b)
+    ids = _shown_log(rig, START + timedelta(minutes=33))
+    assert ids[:5] == [a, c, d, a, "alpha"], ids
+    # the next run tries b again, fails again, and still shows four photos
+    assert ids[5:10] == [c, d, a, c, "alpha"], ids
+    assert attempts.count(b) >= 2 and b not in apps["photos"].renders
+
+
+def test_a_broken_first_pick_does_not_skip_the_photos_entirely(make_rig) -> None:
+    """When the first pick on entering the stream is the broken photo, the
+    run starts with the next one instead of skipping to the card."""
+    apps = fake_apps()
+    rig = make_rig(
+        {
+            "panel": {"refresh_floor_seconds": 30},
+            "rotation": rotation(
+                [turn("alpha", 3)],
+                photos=photo_stream(in_a_row=3, minutes_each=3, order="sequential"),
+            ),
+        },
+        apps=apps,
+    )
+    a, b, c = (
+        rig.add_photo(f"p{i}.jpg", f"2026-10-{i + 1:02d}T10:00:00.000+00:00").id for i in range(3)
+    )
+    _break_photos(apps, a)
+    ids = _shown_log(rig, START + timedelta(minutes=10))
+    assert ids[0] == b, ids  # the run starts with b, not with the card
+    assert ids.index("alpha") == 3, ids
+
+
+def test_two_photos_one_broken_repeats_the_good_one_silently(make_rig) -> None:
+    """With a and b (broken) the run cannot change the picture: b is tried
+    and fails, a repeats silently like a single photo and counts toward
+    in_a_row, and the card follows after three dwells."""
+    apps = fake_apps()
+    rig = make_rig(
+        {
+            "panel": {"refresh_floor_seconds": 30},
+            "rotation": rotation(
+                [turn("alpha", 3)], photos=photo_stream(in_a_row=3, minutes_each=3)
+            ),
+        },
+        apps=apps,
+    )
+    a = rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00").id
+    b = rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00").id
+    attempts = _break_photos(apps, b)
+    refreshes = rig.run_until(START + timedelta(minutes=12))
+    assert rig.shown_id() == "alpha"
+    assert refreshes[0] <= START + timedelta(seconds=1)  # a (b may have been picked first)
+    assert refreshes[1] >= START + timedelta(minutes=9)  # the card after three dwells
+    assert len(refreshes) == 2  # no refresh of the same image in between
+    assert b in attempts and apps["photos"].renders == [a]  # a rendered once, repeats silent
+    assert rig.snapshot()["panel"]["last_error"]["app_id"] == "photos"
+
+
+def test_every_photo_broken_skips_the_stream_and_backs_off(make_rig) -> None:
+    """An all-broken library: each photo is tried once per run, then the
+    stream is skipped like any failed slot (R6); with no card enabled the
+    scheduler backs off instead of spinning at the retry delay."""
+    apps = fake_apps()
+    rig = make_rig(
+        {
+            "panel": {"refresh_floor_seconds": 30},
+            "rotation": rotation(
+                [turn("alpha", 3)], photos=photo_stream(in_a_row=5, minutes_each=3)
+            ),
+        },
+        apps=apps,
+    )
+    ids = [
+        rig.add_photo(f"p{i}.jpg", f"2026-10-{i + 1:02d}T10:00:00.000+00:00").id for i in range(3)
+    ]
+    attempts = _break_photos(apps, *ids)
+    assert rig.tick() == RETRY_DELAY
+    rig.clock.advance(seconds=1)
+    assert rig.tick() == RETRY_DELAY
+    rig.clock.advance(seconds=1)
+    assert rig.tick() == RETRY_DELAY  # the third photo fails: the stream is skipped
     rig.clock.advance(seconds=1)
     rig.tick()
     assert rig.shown_id() == "alpha"
+    assert sorted(attempts) == sorted(ids)  # each tried once
+
+    # photos only: the pass ends in a backoff, about one pass a minute
+    rig.store.patch({"rotation": {"apps": [turn("alpha", 3, enabled=False)]}})
     rig.clock.advance(minutes=3)
-    rig.tick()
-    assert rig.shown_id() == c.id  # the walk moved past the broken photo
+    for _ in range(2):
+        assert rig.tick() == RETRY_DELAY
+        rig.clock.advance(seconds=1)
+    assert rig.tick() == BACKOFF_SECONDS
+    before = len(attempts)
+    rig.run_until(rig.clock.now + timedelta(minutes=10))
+    assert len(attempts) - before <= 3 * (10 + 2)
+    assert rig.shows == 1  # alpha, nothing since
 
 
 # --- R7: persistence ---------------------------------------------------------------------
@@ -883,38 +1334,41 @@ def test_state_survives_restart(make_rig) -> None:
     rig = make_rig(
         {
             "panel": {"refresh_floor_seconds": 30, "keepalive_hours": 5},
-            "rotation": [slot("alpha", 1), slot("photos", 10, dwell_minutes=3), slot("beta", 1)],
+            "rotation": rotation(
+                [turn("alpha", 1), turn("beta", 1)], photos=photo_stream(in_a_row=3, minutes_each=3)
+            ),
         }
     )
     rig.add_photo("one.jpg", "2026-10-01T10:00:00.000+00:00")
     rig.add_photo("two.jpg", "2026-10-02T10:00:00.000+00:00")
-    rig.tick()  # alpha
-    rig.clock.set(START + timedelta(minutes=1))
     rig.tick()  # photos, first photo
-    rig.clock.set(START + timedelta(minutes=4))
+    rig.clock.set(START + timedelta(minutes=3))
     rig.tick()  # photos, second photo
     before = rig.snapshot()
     state_before = rig.sched._state
+    assert state_before.photos_shown == 2
 
     # "restart": new display object, new scheduler, same db and data dir
     rig.display = RecordingDisplay(rig.data)
+    rig.display.clock = rig.clock
     rig.clock.advance(seconds=20)
     rig.sched = rig.new_scheduler()
     after = rig.snapshot()
     st = rig.sched._state
-    assert st.slot_index == state_before.slot_index == 1
+    assert st.slot_index == state_before.slot_index == 0
     assert st.photo_id == state_before.photo_id and st.photo_id is not None
+    assert st.photos_shown == 2  # the run's count carries over
     assert st.recent_photo_ids == state_before.recent_photo_ids
     for key in ("last_refresh_at", "last_attempt_at", "last_source"):
         assert after["panel"][key] == before["panel"][key]
-    assert after["panel"]["last_refresh_at"] == iso(START + timedelta(minutes=4))
+    assert after["panel"]["last_refresh_at"] == iso(START + timedelta(minutes=3))
     assert after["rotation"]["current"] == before["rotation"]["current"]
-    assert after["rotation"]["keepalive_at"] == iso(START + timedelta(hours=5, minutes=4))
-    # the photo's dwell carries over: the next photo is still due at 12:07
+    assert after["rotation"]["keepalive_at"] == iso(START + timedelta(hours=5, minutes=3))
+    # the photo's time carries over: the third photo is still due at 12:06
     assert rig.tick() == pytest.approx(160)
-    # and so does the last attempt: a show-now waits 30 s from 12:04, not from now
+    # and so does the last attempt: a show-now waits 30 s from 12:03, not from now
     info = rig.sched.show_now(app_id="beta")
-    assert info["fires_at"] == iso(START + timedelta(minutes=4, seconds=30))
+    assert info["fires_at"] == iso(START + timedelta(minutes=3, seconds=30))
     assert rig.tick() == pytest.approx(10)
     assert rig.display.show_count == 0
 
@@ -922,7 +1376,7 @@ def test_state_survives_restart(make_rig) -> None:
     rig.sched = rig.new_scheduler()
     rig.sched.pause()
     bin_before = (rig.data / "last_frame.bin").read_bytes()
-    rig.clock.set(START + timedelta(hours=5, minutes=4))
+    rig.clock.set(START + timedelta(hours=5, minutes=3))
     rig.tick()
     assert rig.display.show_count == 1 and rig.source()["type"] == "keepalive"
     assert (rig.data / "last_frame.bin").read_bytes() == bin_before
@@ -930,14 +1384,61 @@ def test_state_survives_restart(make_rig) -> None:
 
 
 def test_restart_clamps_slot_index_and_drops_deleted_photo(make_rig) -> None:
-    rig = make_rig({"rotation": [slot("alpha", 1), slot("beta", 1), slot("photos", 10)]})
+    rig = make_rig(
+        {"rotation": rotation([turn("alpha", 1), turn("beta", 1)], photos=photo_stream())}
+    )
     photo = rig.add_photo("gone.jpg", "2026-10-01T10:00:00.000+00:00")
-    blob = SchedulerState(slot_index=7, slot_app_id="photos", photo_id=photo.id).to_json()
+    blob = SchedulerState(slot_index=7, slot_app_id="beta", photo_id=photo.id).to_json()
     rig.db.set_state(STATE_KEY, blob)
     rig.db.delete_photo(photo.id)
     rig.sched = rig.new_scheduler()
     st = rig.sched._state
     assert st.slot_index == 2 and st.photo_id is None
+
+
+def test_state_from_0_1_resolves_the_position_by_app_id(make_rig) -> None:
+    """An upgraded frame: the 0.1 state has no ``photos_shown`` and its
+    ``slot_index`` counted the old list (``[alpha, beta, photos]``: beta was
+    1).  Against the new list (photos first) the position is found by app
+    id, the card keeps its timing, and the first run afterwards counts from
+    one."""
+    rig = make_rig(
+        {"rotation": rotation([turn("alpha", 5), turn("beta", 5)], photos=photo_stream(2, 3))}
+    )
+    rig.add_photo("a.jpg", "2026-10-01T10:00:00.000+00:00")
+    rig.add_photo("b.jpg", "2026-10-02T10:00:00.000+00:00")
+    old = {
+        "slot_index": 1,
+        "slot_app_id": "beta",
+        "slot_started_at": iso(START - timedelta(minutes=2)),
+        "photo_id": None,
+        "photo_started_at": None,
+        "recent_photo_ids": [],
+        "next_photo_id": None,
+        "last_refresh_at": iso(START - timedelta(minutes=2)),
+        "last_attempt_at": iso(START - timedelta(minutes=2)),
+        "last_source": {"type": "app", "id": "beta", "label": "Beta"},
+        "showing": {"type": "app", "id": "beta", "label": "Beta"},
+        "panel_stale": False,
+        "last_error": None,
+        "frame_rotation": 90,
+        "created_at": iso(START - timedelta(hours=1)),
+    }
+    rig.db.set_state(STATE_KEY, old)
+    rig.sched = rig.new_scheduler()
+    assert rig.sched._state.photos_shown == 0
+    assert rig.tick() == 180  # beta's 5 minutes run to 12:03: nothing to do yet
+    st = rig.sched._state
+    assert (st.slot_index, st.slot_app_id) == (2, "beta")
+    current = rig.snapshot()["rotation"]["current"]
+    assert current["app_id"] == "beta"
+    assert current["started_at"] == iso(START - timedelta(minutes=2))
+    assert current["ends_at"] == iso(START + timedelta(minutes=3))
+    assert rig.snapshot()["rotation"]["next"]["app_id"] == "photos"
+    rig.clock.set(START + timedelta(minutes=3))
+    rig.tick()
+    assert rig.source()["type"] == "photo" and rig.sched._state.photos_shown == 1
+    assert rig.db.get_state(STATE_KEY)["photos_shown"] == 1
 
 
 def test_corrupt_state_falls_back_to_defaults(make_rig) -> None:
@@ -1037,7 +1538,7 @@ def real_clock(tmp_path: Path):
     def build(display: RecordingDisplay) -> CountingScheduler:
         paths = DataPaths(tmp_path / "data").ensure_dirs()
         store = SettingsStore(paths.settings_file)
-        store.patch({"quiet_hours": {"enabled": False}, "rotation": [slot("alpha", 1)]})
+        store.patch({"quiet_hours": {"enabled": False}, "rotation": rotation([turn("alpha", 1)])})
         db = Database(paths.db_file)
         dbs.append(db)
         return CountingScheduler(display, store, db, paths, {"alpha": FakeApp("alpha", 2)})
@@ -1091,7 +1592,7 @@ def test_stop_does_not_wait_for_a_slow_render(tmp_path: Path) -> None:
 
     paths = DataPaths(tmp_path / "data").ensure_dirs()
     store = SettingsStore(paths.settings_file)
-    store.patch({"quiet_hours": {"enabled": False}, "rotation": [slot("alpha", 1)]})
+    store.patch({"quiet_hours": {"enabled": False}, "rotation": rotation([turn("alpha", 1)])})
     db = Database(paths.db_file)
     gate, entered = threading.Event(), threading.Event()
     alpha = FakeApp("alpha", 2)
@@ -1115,7 +1616,7 @@ def test_stop_does_not_wait_for_a_slow_render(tmp_path: Path) -> None:
         assert not sched.refreshing
         snap = sched.snapshot()
         assert snap["panel"]["last_error"] is None
-        assert sched._state.slot_index == 0 and sched._state.slot_started_at is None
+        assert sched._state.slot_app_id == "alpha" and sched._state.slot_started_at is None
     finally:
         gate.set()
         executor.shutdown(wait=True)

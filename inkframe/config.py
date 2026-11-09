@@ -38,8 +38,7 @@ MIN_REFRESH_FLOOR_SECONDS = 30
 MIN_SHOW_NOW_SECONDS = 30
 MAX_KEEPALIVE_HOURS = 23
 _MAX_SECONDS = 24 * 3600
-_MAX_SLOT_MINUTES = 24 * 60
-_MAX_SLOTS = 32
+_MAX_TURN_MINUTES = 24 * 60
 
 #: the recipe new uploads get (plan section 13); per-photo recipes override it
 DEFAULT_RECIPE: Mapping[str, Any] = MappingProxyType(
@@ -344,80 +343,257 @@ def _parse_palette(data: object, strict: bool) -> Palette:
     return Palette.from_dict("measured", out)
 
 
-@dataclass(frozen=True)
-class RotationSlot:
-    """One rotation entry: show ``app_id`` for ``duration_minutes``.
+#: the two ways the photo stream walks the photos
+PHOTO_ORDERS: tuple[str, ...] = ("shuffle", "sequential")
+DEFAULT_PHOTO_ORDER = "shuffle"
+#: ``rotation.photos.in_a_row`` upper bound
+MAX_PHOTOS_IN_A_ROW = 200
+#: ``rotation.apps`` upper bound
+MAX_ROTATION_APPS = 32
+#: ``minutes_each`` for a legacy photos slot whose ``dwell_minutes`` is unusable
+_LEGACY_DWELL_MINUTES = 3
 
-    ``options`` is opaque here and owned by the app / scheduler (the photos
-    slot uses ``{"dwell_minutes": int, "order": "shuffle"|"sequential"}``).
-    It is stored read-only; ``to_dict`` returns a plain copy.
+
+@dataclass(frozen=True)
+class PhotoStream:
+    """The photo run of a cycle: ``in_a_row`` photos back to back, each for
+    ``minutes_each`` minutes, in ``order`` (``shuffle`` or ``sequential``).
+
+    The run is count based: exactly ``in_a_row`` photos, however long each
+    refresh takes.  Its length in minutes is nominal (the floor can stretch
+    a photo), which is why the cycle maths in the UI says "about".
+    """
+
+    enabled: bool = True
+    in_a_row: int = 6
+    minutes_each: int = 3
+    order: str = DEFAULT_PHOTO_ORDER
+
+    def __post_init__(self) -> None:
+        _bool("rotation.photos.enabled", self.enabled)
+        object.__setattr__(
+            self,
+            "in_a_row",
+            _int("rotation.photos.in_a_row", self.in_a_row, 1, MAX_PHOTOS_IN_A_ROW),
+        )
+        object.__setattr__(
+            self,
+            "minutes_each",
+            _int("rotation.photos.minutes_each", self.minutes_each, 1, _MAX_TURN_MINUTES),
+        )
+        if not isinstance(self.order, str) or self.order not in PHOTO_ORDERS:
+            raise ValueError(
+                f"rotation.photos.order must be {' or '.join(PHOTO_ORDERS)}, got {self.order!r}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "in_a_row": self.in_a_row,
+            "minutes_each": self.minutes_each,
+            "order": self.order,
+        }
+
+
+@dataclass(frozen=True)
+class AppTurn:
+    """One card in the cycle: ``app_id`` shows once per cycle for ``minutes``.
+
+    Validation messages name the bare field (``minutes must be ...``);
+    ``RotationSettings.from_dict`` prefixes the position (``rotation.apps[1].``).
     """
 
     app_id: str
-    duration_minutes: int
     enabled: bool = True
-    options: Mapping[str, Any] = field(default_factory=dict)
+    minutes: int = 3
 
     def __post_init__(self) -> None:
         if not isinstance(self.app_id, str) or _APP_ID.fullmatch(self.app_id) is None:
             raise ValueError(
                 f"app_id must be a lowercase identifier (a-z, 0-9, _), got {self.app_id!r}"
             )
-        object.__setattr__(
-            self,
-            "duration_minutes",
-            _int("duration_minutes", self.duration_minutes, 1, _MAX_SLOT_MINUTES),
-        )
         _bool("enabled", self.enabled)
-        if not isinstance(self.options, Mapping) or not all(
-            isinstance(k, str) for k in self.options
-        ):
-            raise ValueError(f"options must be an object with string keys, got {self.options!r}")
-        try:
-            json.dumps(_thaw(self.options), allow_nan=False)
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"options must be JSON-serialisable: {e}") from None
-        object.__setattr__(self, "options", _freeze(self.options))
+        object.__setattr__(self, "minutes", _int("minutes", self.minutes, 1, _MAX_TURN_MINUTES))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "app_id": self.app_id,
-            "enabled": self.enabled,
-            "duration_minutes": self.duration_minutes,
-            "options": _thaw(self.options),
-        }
+        return {"app_id": self.app_id, "enabled": self.enabled, "minutes": self.minutes}
 
 
-_SLOT_KEYS = ("app_id", "enabled", "duration_minutes", "options")
+def _default_app_turns() -> tuple[AppTurn, ...]:
+    return (
+        AppTurn("weather", minutes=3),
+        AppTurn("headlines", minutes=3),
+        AppTurn("quotes", minutes=2),
+        AppTurn("patterns", minutes=2),
+    )
 
 
-def _parse_rotation(data: object, strict: bool) -> tuple[RotationSlot, ...]:
-    if not isinstance(data, (list, tuple)):
-        raise ValueError(f"rotation must be a list of slots, got {type(data).__name__}")
-    if len(data) > _MAX_SLOTS:
-        raise ValueError(f"rotation has {len(data)} slots; at most {_MAX_SLOTS} are allowed")
-    slots = []
-    for i, item in enumerate(data):
+_ROTATION_KEYS = ("photos", "apps")
+_PHOTOS_KEYS = ("enabled", "in_a_row", "minutes_each", "order")
+_TURN_KEYS = ("app_id", "enabled", "minutes")
+#: the 0.1 slot list: ``[{app_id, enabled, duration_minutes, options}, ...]``
+_LEGACY_SLOT_KEYS = ("app_id", "enabled", "duration_minutes", "options")
+
+
+@dataclass(frozen=True)
+class RotationSettings:
+    """What the frame cycles through: the photo stream, then every enabled
+    card in ``apps`` once, in order, then photos again.
+
+    ``photos`` is always present (disabled: cards only); ``apps`` holds at most
+    ``MAX_ROTATION_APPS`` turns with distinct ids, never ``photos``.
+    """
+
+    photos: PhotoStream = field(default_factory=PhotoStream)
+    apps: tuple[AppTurn, ...] = field(default_factory=_default_app_turns)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.photos, PhotoStream):
+            raise ValueError("rotation.photos must be a PhotoStream")
+        if not isinstance(self.apps, (list, tuple)) or not all(
+            isinstance(t, AppTurn) for t in self.apps
+        ):
+            raise ValueError("rotation.apps must be a sequence of AppTurn")
+        if len(self.apps) > MAX_ROTATION_APPS:
+            raise ValueError(
+                f"rotation.apps has {len(self.apps)} entries; "
+                f"at most {MAX_ROTATION_APPS} are allowed"
+            )
+        seen: dict[str, int] = {}
+        for i, turn in enumerate(self.apps):
+            if turn.app_id == "photos":
+                raise ValueError(f"rotation.apps[{i}].app_id: photos belongs in rotation.photos")
+            if turn.app_id in seen:
+                raise ValueError(
+                    f"rotation.apps[{i}].app_id: duplicate of rotation.apps[{seen[turn.app_id]}]"
+                )
+            seen[turn.app_id] = i
+        object.__setattr__(self, "apps", tuple(self.apps))
+
+    def cycle_minutes(self) -> int:
+        """The nominal length of one cycle: the photo run (if enabled) plus
+        every enabled card's minutes."""
+        total = self.photos.in_a_row * self.photos.minutes_each if self.photos.enabled else 0
+        return total + sum(t.minutes for t in self.apps if t.enabled)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"photos": self.photos.to_dict(), "apps": [t.to_dict() for t in self.apps]}
+
+    @classmethod
+    def from_dict(cls, data: object, *, strict: bool = True) -> RotationSettings:
+        """Build from the ``{"photos": {...}, "apps": [...]}`` shape (keys may
+        be missing: they take their defaults) or from the 0.1 slot list,
+        which is converted (see ``_convert_legacy_rotation``).  Unknown keys
+        raise in strict mode and are dropped with a warning otherwise."""
+        if isinstance(data, (list, tuple)):
+            data = _convert_legacy_rotation(data, strict)
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                "rotation must be an object with photos and apps (or the 0.1 list of slots), "
+                f"got {type(data).__name__}"
+            )
+        top = _pick("rotation", data, _ROTATION_KEYS, strict)
+        photos = _pick("rotation.photos", top.get("photos", {}), _PHOTOS_KEYS, strict)
+        raw_apps = top.get("apps", [t.to_dict() for t in _default_app_turns()])
+        if not isinstance(raw_apps, (list, tuple)):
+            raise ValueError(f"rotation.apps must be a list, got {type(raw_apps).__name__}")
+        if len(raw_apps) > MAX_ROTATION_APPS:
+            raise ValueError(
+                f"rotation.apps has {len(raw_apps)} entries; "
+                f"at most {MAX_ROTATION_APPS} are allowed"
+            )
+        turns = []
+        for i, item in enumerate(raw_apps):
+            path = f"rotation.apps[{i}]"
+            kw = _pick(path, item, _TURN_KEYS, strict)
+            if "app_id" not in kw:
+                raise ValueError(f"{path} is missing key(s): app_id")
+            try:
+                turns.append(AppTurn(**kw))
+            except ValueError as e:
+                raise ValueError(f"{path}.{e}") from None
+        return cls(photos=PhotoStream(**photos), apps=tuple(turns))
+
+
+def _convert_legacy_rotation(slots: Sequence[object], strict: bool) -> dict[str, Any]:
+    """The 0.1 slot list as the new shape (a plain dict, validated afterwards).
+
+    The first ``photos`` slot becomes the photo stream: ``minutes_each`` is
+    its ``options.dwell_minutes`` (a whole number of minutes 1..1440, else 3)
+    and ``in_a_row`` is ``duration_minutes / minutes_each`` rounded (halves
+    up, at least 1, at most ``MAX_PHOTOS_IN_A_ROW`` with a warning: 0.1
+    accepted 1440 minutes at 1 per photo and a valid file must keep
+    loading), so 10 minutes at 3 per photo becomes 3 in a row.  No photos
+    slot: the stream is disabled.  Every other slot becomes a card
+    with its minutes; a repeated app id keeps its first occurrence and the
+    opaque ``options`` of app slots are dropped.  The legacy fields are
+    validated under their old names (``rotation[2].duration_minutes ...``),
+    so a slot that was invalid still is.
+    """
+    photos: dict[str, Any] = {"enabled": False}
+    apps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    found_photos = False
+    for i, item in enumerate(slots):
         path = f"rotation[{i}]"
-        kw = _pick(path, item, _SLOT_KEYS, strict)
+        kw = _pick(path, item, _LEGACY_SLOT_KEYS, strict)
         missing = [k for k in ("app_id", "duration_minutes") if k not in kw]
         if missing:
             raise ValueError(f"{path} is missing key(s): {', '.join(missing)}")
-        try:
-            slots.append(RotationSlot(**kw))
-        except ValueError as e:
-            raise ValueError(f"{path}.{e}") from None
-    return tuple(slots)
-
-
-def _default_rotation() -> tuple[RotationSlot, ...]:
-    return (
-        RotationSlot("photos", 10, options={"dwell_minutes": 3, "order": "shuffle"}),
-        RotationSlot("weather", 3),
-        RotationSlot("headlines", 3),
-        RotationSlot("quotes", 2),
-        RotationSlot("patterns", 2),
-    )
+        app_id = kw["app_id"]
+        if not isinstance(app_id, str) or _APP_ID.fullmatch(app_id) is None:
+            raise ValueError(
+                f"{path}.app_id must be a lowercase identifier (a-z, 0-9, _), got {app_id!r}"
+            )
+        minutes = _int(f"{path}.duration_minutes", kw["duration_minutes"], 1, _MAX_TURN_MINUTES)
+        enabled = _bool(f"{path}.enabled", kw.get("enabled", True))
+        if app_id == "photos":
+            if found_photos:
+                log.warning("%s: a second photos slot is ignored", path)
+                continue
+            found_photos = True
+            options = kw.get("options")
+            opts = options if isinstance(options, Mapping) else {}
+            dwell = opts.get("dwell_minutes")
+            if (
+                isinstance(dwell, bool)
+                or not isinstance(dwell, (int, float))
+                or dwell != dwell  # NaN
+                or not float(dwell).is_integer()
+                or not 1 <= dwell <= _MAX_TURN_MINUTES
+            ):
+                dwell = _LEGACY_DWELL_MINUTES
+            dwell = int(dwell)
+            order = opts.get("order")
+            if not isinstance(order, str) or order not in PHOTO_ORDERS:
+                order = DEFAULT_PHOTO_ORDER
+            in_a_row = max(1, (2 * minutes + dwell) // (2 * dwell))
+            if in_a_row > MAX_PHOTOS_IN_A_ROW:
+                # 0.1 allowed 1440 min at 1 per photo; the new cap must not
+                # invalidate (and so discard) a settings file that was valid
+                log.warning(
+                    "%s: %d minutes at %d per photo would be %d in a row; capped at %d",
+                    path,
+                    minutes,
+                    dwell,
+                    in_a_row,
+                    MAX_PHOTOS_IN_A_ROW,
+                )
+                in_a_row = MAX_PHOTOS_IN_A_ROW
+            photos = {
+                "enabled": enabled,
+                "in_a_row": in_a_row,
+                "minutes_each": dwell,
+                "order": order,
+            }
+            continue
+        if app_id in seen:
+            log.warning("%s: a second %s slot is ignored", path, app_id)
+            continue
+        seen.add(app_id)
+        apps.append({"app_id": app_id, "enabled": enabled, "minutes": minutes})
+    log.info("converted the 0.1 rotation slot list to the photos + cards shape")
+    return {"photos": photos, "apps": apps}
 
 
 # --- the whole tree ----------------------------------------------------------------
@@ -435,7 +611,7 @@ class Settings:
     palette: PaletteSettings = field(default_factory=PaletteSettings)
     #: read-only mapping; ``dict(settings.default_recipe)`` for a mutable copy
     default_recipe: Mapping[str, Any] = field(default_factory=lambda: DEFAULT_RECIPE)
-    rotation: tuple[RotationSlot, ...] = field(default_factory=_default_rotation)
+    rotation: RotationSettings = field(default_factory=RotationSettings)
     #: rotation paused from the UI (keep-alive refreshes still happen)
     paused: bool = False
 
@@ -450,13 +626,8 @@ class Settings:
                 raise ValueError(f"{name} must be a {cls.__name__}")
         recipe = validate_recipe(self.default_recipe, "default_recipe")
         object.__setattr__(self, "default_recipe", MappingProxyType(recipe))
-        if not isinstance(self.rotation, (list, tuple)) or not all(
-            isinstance(s, RotationSlot) for s in self.rotation
-        ):
-            raise ValueError("rotation must be a sequence of RotationSlot")
-        if len(self.rotation) > _MAX_SLOTS:
-            raise ValueError(f"rotation has {len(self.rotation)} slots; at most {_MAX_SLOTS}")
-        object.__setattr__(self, "rotation", tuple(self.rotation))
+        if not isinstance(self.rotation, RotationSettings):
+            raise ValueError("rotation must be a RotationSettings")
         _bool("paused", self.paused)
 
     # --- palettes ---------------------------------------------------------
@@ -477,7 +648,7 @@ class Settings:
             "quiet_hours": self.quiet_hours.to_dict(),
             "palette": self.palette.to_dict(),
             "default_recipe": dict(self.default_recipe),
-            "rotation": [s.to_dict() for s in self.rotation],
+            "rotation": self.rotation.to_dict(),
             "paused": self.paused,
         }
 
@@ -486,7 +657,8 @@ class Settings:
         """Build from a (possibly partial) dict; missing keys take defaults.
 
         ``strict`` rejects unknown keys at any level (API input); otherwise they
-        are logged and ignored (a file written by a newer version).
+        are logged and ignored (a file written by a newer version).  A 0.1
+        ``rotation`` slot list is accepted in both modes and converted.
         """
         if not isinstance(data, Mapping):
             raise ValueError(f"settings must be an object, got {type(data).__name__}")
@@ -514,14 +686,16 @@ class Settings:
                 use_measured=palette["use_measured"],
             ),
             default_recipe=recipe,
-            rotation=_parse_rotation(top["rotation"], strict),
+            rotation=RotationSettings.from_dict(top["rotation"], strict=strict),
             paused=top["paused"],
         )
 
     def merged(self, patch: object) -> Settings:
         """A new ``Settings`` with a full or partial dict deep-merged over this
-        one (lists such as ``rotation`` and ``quiet_hours.days`` are replaced
-        whole), validated strictly."""
+        one, validated strictly.  Nested objects merge key by key
+        (``rotation.photos``), lists are replaced whole (``rotation.apps``,
+        ``quiet_hours.days``); a 0.1 slot list under ``rotation`` replaces the
+        whole section and is converted."""
         if not isinstance(patch, Mapping):
             raise ValueError(f"settings update must be an object, got {type(patch).__name__}")
         return Settings.from_dict(deep_merge(self.to_dict(), patch), strict=True)

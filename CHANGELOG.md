@@ -2,8 +2,27 @@
 
 All notable changes to Inkframe. One entry per build phase; dates are local (America/New_York).
 
-## Unreleased (2026-10-21)
+## 0.2.0 — unreleased
 
+- Rotation rework: "N photos in a row, then the cards". `rotation.photos`
+  (`enabled`, `in_a_row`, `minutes_each`, `order`) replaces the photos slot
+  and `rotation.apps` (`app_id`, `enabled`, `minutes`) the app slots; one
+  cycle is `in_a_row` photos back to back, then every enabled card once, in
+  order (default 6 × 3 min, then weather 3, headlines 3, quotes 2, patterns
+  2: 28 min, 64% photos). The photo run is a count, so a 19 s refresh or a
+  long floor stretches a photo instead of dropping one (0.1 skipped a change
+  that would overrun the slot's minutes), and a show-now of a photo restarts
+  the run. The Rotation page gained a Photos section, lists every app as a
+  card (no "add" control) and shows the cycle length, the photo share and
+  how often each card comes round, live. `GET /api/rotation` now returns
+  `{photos, apps, paused, quiet_hours}` and `PUT` takes `{photos?, apps?,
+  paused?}`. A photo that fails to render no longer ends the photo run: it
+  is left out until the next run and the next photo is tried. An existing
+  `settings.json` is converted on load: a photos slot of 10 min at 3 per
+  photo becomes 3 in a row, 3 min each (capped at 200 in a row); app slots
+  keep their minutes; the file is rewritten in the new shape at the first
+  save, and `PUT /api/settings` still accepts the old list. There is no
+  per-card frequency knob: every card shows once per cycle.
 - Weather and Headlines retry a transient failure (a connection error or an
   HTTP 5xx) once after 2 s, inside the same time budget; a 4xx, a body that is
   not JSON or a feed that does not parse is not retried. Added after Open-Meteo

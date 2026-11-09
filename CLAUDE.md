@@ -53,7 +53,8 @@ is the original plan and is wrong in places (below).
   Also the Host/Origin check, the `{"error"}` 500/404/422 handlers and the `/static` (no-cache)
   and `/fonts` mounts.
 - `config.py`: frozen, self-validating `Settings` tree (`DisplaySettings`, `PanelSettings`, `QuietHours`,
-  `PaletteSettings`, `RotationSlot`), `DEFAULT_RECIPE`, `RECIPE_RANGES`, `validate_recipe`, `SettingsStore`
+  `PaletteSettings`, `RotationSettings` = `PhotoStream` + `AppTurn`s; the 0.1 slot list is converted on load),
+  `DEFAULT_RECIPE`, `RECIPE_RANGES`, `validate_recipe`, `SettingsStore`
   (`get` lock-free; `replace/update/patch` validate, save atomically, swap). Bad file -> `settings.json.invalid`.
 - `db.py` `Database` (sqlite3, WAL, one RLock): `Photo`, `add/get/list/delete_photo`, `set_photo_recipe/excluded`,
   `get/set_app_settings`, `get/set_state`; `MIGRATIONS` is append-only. `paths.py`: `DataPaths`,
@@ -61,7 +62,8 @@ is the original plan and is wrong in places (below).
 - `scheduler.py` `Scheduler`: `tick(now)` (one decision, at most one refresh, returns next delay),
   `start/stop/wake`, `pause/resume`, `show_now(app_id|photo_id, variant)`, `show_next`, `invalidate`
   (called by `PUT /api/photos/{id}/recipe` with the id and by `PUT /api/recipe/default` without one),
-  `snapshot`; helpers `quiet_window_active`, `pick_next_photo`, `photo_options`, `build_render_context`.
+  `snapshot`; helpers `quiet_window_active`, `pick_next_photo`, `build_render_context`; `_slots(settings)`
+  derives the slot list it runs on (the photo stream at index 0, then `rotation.apps`).
 - `display/palette.py`: indices, `PANEL_CODES`, `NOMINAL`/`MEASURED_DEFAULT`, `pack_frame/unpack_frame`,
   `indices_to_image`, `rgb_to_indices_exact`. `display/base.py`: `Display` protocol, `validate_frame`,
   `DisplayError/Timeout/NotReady`. `display/epd4in0e.py` `EPD4in0e` (real panel; injectable `SpiBus`/`Gpio`),
@@ -110,7 +112,11 @@ is the original plan and is wrong in places (below).
   keepalive_at,pending{kind,id,label,fires_at}}`; `settings{refresh_floor_seconds,keepalive_hours,quiet_hours,
   clear_before_refresh}`; `system{uptime_seconds,hostname,data_dir,disk_free_bytes,display_env,storage{masters_
   bytes,renders_bytes,cache_bytes,db_bytes}}`. `static/js/now.js` depends on it.
-- **Errors.** Every non-2xx body is `{"error": "<message>"}` (422 names the field: `rotation[2].duration_minutes ...`).
+- **Rotation model.** `rotation.photos {enabled, in_a_row 1..200, minutes_each 1..1440, order}` + `rotation.apps
+  [{app_id, enabled, minutes 1..1440}]` (<= 32, unique, never `photos`); one cycle = `in_a_row` photos then every
+  enabled card once. The photo run is a count (`SchedulerState.photos_shown`), never a duration. The 0.1 list
+  (`duration_minutes`, `options.dwell_minutes`) is read by `config._convert_legacy_rotation` and never written.
+- **Errors.** Every non-2xx body is `{"error": "<message>"}` (422 names the field: `rotation.apps[2].minutes ...`).
   Photo ids are `uuid4().hex`; anything else is a 404. Times in the DB and API are ISO-8601 UTC with milliseconds.
 - **DB state keys.** `scheduler` (JSON blob, `SchedulerState`), `last_refresh_at`, `last_source` (mirrors the
   UI/status read). Data dir files: `settings.json`, `inkframe.db`, `masters/`, `renders/`, `cache/<app_id>/`,

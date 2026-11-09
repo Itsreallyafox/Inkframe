@@ -42,7 +42,17 @@ from inkframe.db import Database
 from inkframe.display.palette import WHITE
 from inkframe.paths import DataPaths
 from inkframe.scheduler import CRASH_DELAY, STATE_KEY, Scheduler, iso, quiet_window_active
-from tests.conftest import START, FakeApp, FakeClock, RecordingDisplay, at, fake_apps, slot
+from tests.conftest import (
+    START,
+    FakeApp,
+    FakeClock,
+    RecordingDisplay,
+    at,
+    fake_apps,
+    photo_stream,
+    rotation,
+    turn,
+)
 
 # --- clocks ---------------------------------------------------------------------------
 
@@ -303,9 +313,12 @@ def test_probe_r3_photo_listing_failure_does_not_starve_the_keepalive(make_rig) 
     frame (which needs no database).  ``snapshot()`` raises too, so
     ``/api/status`` is a 500."""
     rig = make_rig(
-        {"panel": {"keepalive_hours": 1}, "rotation": [slot("alpha", 1), slot("photos", 1)]}
+        {
+            "panel": {"keepalive_hours": 1},
+            "rotation": rotation([turn("alpha", 1)], photos=photo_stream(in_a_row=1)),
+        }
     )
-    rig.tick()  # alpha at 12:00
+    rig.tick()  # the "no photos" card at 12:00
     assert rig.shows == 1
 
     def broken(include_excluded: bool = True):
@@ -388,7 +401,7 @@ def test_probe_next_at_uses_the_local_wall_clock_for_quiet_hours(make_rig) -> No
     rig = make_rig(
         {
             "quiet_hours": {"enabled": True, "start": "23:00", "end": "07:00", "days": [0, 1]},
-            "rotation": [slot("alpha", 10), slot("beta", 10)],
+            "rotation": rotation([turn("alpha", 10), turn("beta", 10)]),
         },
         clock=FakeClock(at(19, 22, 55)),
     )
@@ -561,7 +574,10 @@ def test_probe_r6_an_app_raising_systemexit_does_not_kill_the_scheduler_thread(
     paths = DataPaths(tmp_path / "data").ensure_dirs()
     store = SettingsStore(paths.settings_file)
     store.patch(
-        {"quiet_hours": {"enabled": False}, "rotation": [slot("alpha", 1), slot("beta", 1)]}
+        {
+            "quiet_hours": {"enabled": False},
+            "rotation": rotation([turn("alpha", 1), turn("beta", 1)]),
+        }
     )
     db = Database(paths.db_file)
 
@@ -601,7 +617,7 @@ def test_probe_r6_a_failed_refresh_is_repaired_when_the_content_is_static(make_r
     rig = make_rig(
         {
             "display": {"clear_before_refresh": True},
-            "rotation": [slot("photos", 10, dwell_minutes=3)],
+            "rotation": rotation([], photos=photo_stream(in_a_row=3, minutes_each=3)),
         }
     )
     photo = rig.add_photo("only.jpg", "2026-10-01T10:00:00.000+00:00")
@@ -658,12 +674,15 @@ def test_probe_r3_r6_a_photo_whose_recipe_is_not_an_object_does_not_stall_the_fr
     raise after the render must be handled like a render failure (the slot
     skipped), and a non-mapping recipe should fall back to the default."""
     rig = make_rig(
-        {"panel": {"keepalive_hours": 1}, "rotation": [slot("alpha", 1), slot("photos", 10)]}
+        {
+            "panel": {"keepalive_hours": 1},
+            "rotation": rotation([turn("alpha", 1)], photos=photo_stream(in_a_row=3)),
+        }
     )
     photo = rig.add_photo("odd.jpg", "2026-10-01T10:00:00.000+00:00")
     with rig.db._lock:
         rig.db._conn.execute("UPDATE photos SET recipe = ? WHERE id = ?", ('"atkinson"', photo.id))
-    rig.tick()  # alpha at 12:00
+    rig.tick()  # 12:00: the photo stream is first now, so the odd photo is up at once
     end = START + timedelta(hours=1, minutes=10)
     crashes = 0
     while rig.clock.now < end:

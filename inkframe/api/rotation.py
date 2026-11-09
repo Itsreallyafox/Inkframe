@@ -1,16 +1,20 @@
-"""``GET/PUT /api/rotation``: the ordered app slots the frame cycles through.
+"""``GET/PUT /api/rotation``: the photo stream and the cards the frame cycles through.
 
-The slots live in ``settings.rotation`` (one source of truth with
-``/api/settings``); this route adds what the Rotation page needs around them
-(app names and descriptions, the known app ids) and validates more strictly
-than the settings tree can on its own: app ids must be known apps and the
-photos slot's options are checked (``dwell_minutes`` 1..1440, ``order``
-``shuffle``/``sequential``).
+The model lives in ``settings.rotation`` (one source of truth with
+``/api/settings``); this route adds what the Rotation page needs around it:
+every registered app is listed (a stored turn with its settings, any other
+app switched off with a default), with its name and description, and app
+ids are checked against the registry, which the settings tree cannot do on
+its own.  An id that is stored already passes even when it is no longer
+registered (an app a later release removed), so the page can keep saving
+until that card is dropped.  Validation messages from the tree
+(``rotation.apps[1].minutes must be between 1 and 1440, got 0``) pass
+through as the 422 ``error``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -18,68 +22,84 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from inkframe.api import AppsDep, SettingsDep
 from inkframe.apps.base import App
 from inkframe.config import Settings
-from inkframe.scheduler import PHOTOS_APP_ID, photo_options, validate_photo_options
+from inkframe.scheduler import PHOTOS_APP_ID
 
 router = APIRouter(prefix="/api", tags=["rotation"])
 
-_BODY_KEYS = ("slots", "paused")
-#: read-only keys the GET shape adds to each slot; accepted (and ignored) on PUT
-_DERIVED_SLOT_KEYS = ("name", "description")
+#: minutes a registered app that has no stored turn is listed with (switched off)
+DEFAULT_APP_MINUTES = 2
+_BODY_KEYS = ("photos", "apps", "paused")
+#: read-only keys the GET shape adds to each app entry; accepted (and ignored) on PUT
+_DERIVED_KEYS = ("name", "description")
 
 
 def rotation_view(settings: Settings, apps: Mapping[str, App]) -> dict[str, Any]:
     """The ``GET /api/rotation`` shape.
 
-    The photos slot's options are reported as the scheduler reads them
-    (``dwell_minutes`` and ``order``, defaults filled in) and nothing else:
-    keys that ``/api/settings`` stored but the scheduler ignores are left
-    out, so a GET body can always be PUT back."""
-    slots = []
-    for slot in settings.rotation:
-        d = slot.to_dict()
-        if slot.app_id == PHOTOS_APP_ID:
-            dwell, order = photo_options(slot.options)
-            minutes = dwell.total_seconds() / 60
-            d["options"] = {
-                "dwell_minutes": int(minutes) if minutes.is_integer() else minutes,
-                "order": order,
+    ``apps`` lists the stored turns in order, then every other registered
+    app (except ``photos``) switched off with ``DEFAULT_APP_MINUTES``, so the
+    page always shows every app and one added by an upgrade appears off.  A
+    stored id that is no longer registered keeps its row, named by its id."""
+    turns = []
+    listed: set[str] = set()
+    for turn in settings.rotation.apps:
+        app = apps.get(turn.app_id)
+        turns.append(
+            {
+                **turn.to_dict(),
+                "name": app.name if app is not None else turn.app_id,
+                "description": app.description if app is not None else "",
             }
-        app = apps.get(slot.app_id)
-        d["name"] = app.name if app is not None else slot.app_id
-        d["description"] = app.description if app is not None else ""
-        slots.append(d)
+        )
+        listed.add(turn.app_id)
+    for app_id, app in apps.items():
+        if app_id == PHOTOS_APP_ID or app_id in listed:
+            continue
+        turns.append(
+            {
+                "app_id": app_id,
+                "enabled": False,
+                "minutes": DEFAULT_APP_MINUTES,
+                "name": app.name,
+                "description": app.description,
+            }
+        )
     return {
-        "slots": slots,
+        "photos": settings.rotation.photos.to_dict(),
+        "apps": turns,
         "paused": settings.paused,
         "quiet_hours": settings.quiet_hours.to_dict(),
-        "apps": list(apps),
     }
 
 
 @router.get("/rotation")
 def read_rotation(store: SettingsDep, apps: AppsDep) -> dict[str, Any]:
-    """Slots in order with app names, the paused flag, quiet hours, app ids."""
+    """The photo stream, every app with its turn, the paused flag, quiet hours."""
     return rotation_view(store.get(), apps)
 
 
-def _clean_slots(raw: object, apps: Mapping[str, App]) -> list[dict[str, Any]]:
+def _clean_apps(
+    raw: object, apps: Mapping[str, App], stored: Collection[str]
+) -> list[dict[str, Any]]:
+    """The ``apps`` list of a PUT body without the derived keys, every id a
+    registered app or one in ``stored`` (the ids ``settings.rotation.apps``
+    holds now: a card whose app is gone stays saveable, as the GET shape
+    lists it).  Everything else is left to the settings tree, whose messages
+    name the field."""
     if not isinstance(raw, list):
-        raise ValueError(f"slots must be a list, got {type(raw).__name__}")
+        raise ValueError(f"apps must be a list, got {type(raw).__name__}")
+    known = [a for a in apps if a != PHOTOS_APP_ID]
     out = []
     for i, item in enumerate(raw):
-        where = f"slots[{i}]"
+        where = f"apps[{i}]"
         if not isinstance(item, Mapping):
             raise ValueError(f"{where} must be an object")
-        slot = {k: v for k, v in item.items() if k not in _DERIVED_SLOT_KEYS}
-        app_id = slot.get("app_id")
-        if not isinstance(app_id, str) or app_id not in apps:
-            raise ValueError(f"{where}.app_id: unknown app {app_id!r}; known: {', '.join(apps)}")
-        if app_id == PHOTOS_APP_ID:
-            try:
-                slot["options"] = validate_photo_options(slot.get("options"))
-            except ValueError as e:
-                raise ValueError(f"{where}.{e}") from None
-        out.append(slot)
+        turn = {k: v for k, v in item.items() if k not in _DERIVED_KEYS}
+        app_id = turn.get("app_id")
+        # photos passes here so the tree can say where it belongs
+        if not isinstance(app_id, str) or (app_id not in apps and app_id not in stored):
+            raise ValueError(f"{where}.app_id: unknown app {app_id!r}; known: {', '.join(known)}")
+        out.append(turn)
     return out
 
 
@@ -87,15 +107,23 @@ def _clean_slots(raw: object, apps: Mapping[str, App]) -> list[dict[str, Any]]:
 def update_rotation(
     body: Annotated[dict[str, Any], Body()], request: Request, store: SettingsDep, apps: AppsDep
 ) -> dict[str, Any]:
-    """Replace the whole slot list (``{"slots": [...]}``, optionally
-    ``"paused"``).  Invalid input: 422 with the reason; nothing changes."""
+    """``{"photos": {...}?, "apps": [...]?, "paused"?: bool}``, at least one
+    of ``photos``/``apps``.  ``photos`` patches the stream key by key;
+    ``apps`` replaces the whole list.  Invalid input: 422 with the reason;
+    nothing changes.  Wakes the scheduler and returns the GET shape."""
     unknown = sorted(k for k in body if k not in _BODY_KEYS)
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown key(s): {', '.join(unknown)}")
-    if "slots" not in body:
-        raise HTTPException(status_code=422, detail="slots is required")
+    if "photos" not in body and "apps" not in body:
+        raise HTTPException(status_code=422, detail="photos or apps is required")
     try:
-        patch: dict[str, Any] = {"rotation": _clean_slots(body["slots"], apps)}
+        rotation: dict[str, Any] = {}
+        if "photos" in body:
+            rotation["photos"] = body["photos"]
+        if "apps" in body:
+            stored = [t.app_id for t in store.get().rotation.apps]
+            rotation["apps"] = _clean_apps(body["apps"], apps, stored)
+        patch: dict[str, Any] = {"rotation": rotation}
         if "paused" in body:
             patch["paused"] = body["paused"]
         settings = store.patch(patch)

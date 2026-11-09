@@ -170,13 +170,21 @@ def fake_apps(*failing: str) -> dict[str, FakeApp]:
 
 
 class RecordingDisplay(MockDisplay):
-    """A MockDisplay that records the order of calls and can be told to fail."""
+    """A MockDisplay that records the order of calls and can be told to fail.
 
-    def __init__(self, data_dir: Path, **kw: Any) -> None:
+    With ``show_seconds`` set and a ``clock`` attached (``Rig`` attaches its
+    ``FakeClock``), every ``show()`` moves the fake clock forward by that
+    much, like the real ~19 s refresh, so timelines can check that a slow
+    refresh costs no photo.
+    """
+
+    def __init__(self, data_dir: Path, *, show_seconds: float = 0.0, **kw: Any) -> None:
         super().__init__(data_dir, **kw)
         self.calls: list[str] = []
         self.fail_show = False
         self.fail_init = False
+        self.show_seconds = show_seconds
+        self.clock: FakeClock | None = None
 
     def init(self) -> None:
         self.calls.append("init")
@@ -190,6 +198,8 @@ class RecordingDisplay(MockDisplay):
 
     def show(self, frame: np.ndarray) -> None:
         self.calls.append("show")
+        if self.show_seconds and self.clock is not None:
+            self.clock.advance(seconds=self.show_seconds)
         if self.fail_show:
             raise DisplayTimeout("BUSY did not release")
         super().show(frame)
@@ -199,15 +209,33 @@ class RecordingDisplay(MockDisplay):
         super().sleep()
 
 
-def slot(app_id: str, minutes: int, enabled: bool = True, **options: Any) -> dict[str, Any]:
-    """A rotation slot dict for settings patches."""
+def turn(app_id: str, minutes: int, enabled: bool = True) -> dict[str, Any]:
+    """One card of ``rotation.apps`` for a settings patch."""
+    return {"app_id": app_id, "enabled": enabled, "minutes": minutes}
+
+
+def photo_stream(
+    in_a_row: int = 6, minutes_each: int = 3, order: str = "shuffle", enabled: bool = True
+) -> dict[str, Any]:
+    """``rotation.photos`` for a settings patch."""
+    return {"enabled": enabled, "in_a_row": in_a_row, "minutes_each": minutes_each, "order": order}
+
+
+def rotation(apps: list[dict[str, Any]], photos: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A whole ``rotation`` section: the cards in order and the photo stream
+    (``None``: photos switched off, so a card-only rig is explicit)."""
+    return {"photos": photos if photos is not None else {"enabled": False}, "apps": list(apps)}
+
+
+def legacy_slot(app_id: str, minutes: int, enabled: bool = True, **options: Any) -> dict[str, Any]:
+    """A 0.1 rotation slot, for the tests of the legacy-list conversion only."""
     return {"app_id": app_id, "duration_minutes": minutes, "enabled": enabled, "options": options}
 
 
-#: every rig starts from this: quiet hours off, three 1-minute slots
+#: every rig starts from this: quiet hours off, photos off, three 1-minute cards
 BASE_SETTINGS: dict[str, Any] = {
     "quiet_hours": {"enabled": False},
-    "rotation": [slot("alpha", 1), slot("beta", 1), slot("gamma", 1)],
+    "rotation": rotation([turn("alpha", 1), turn("beta", 1), turn("gamma", 1)]),
 }
 
 
@@ -222,7 +250,10 @@ class Rig:
         apps: Mapping[str, Any] | None = None,
         clock: FakeClock | None = None,
         display: RecordingDisplay | None = None,
+        show_seconds: float = 0.0,
     ) -> None:
+        """``show_seconds``: how long each ``show()`` moves the fake clock
+        (0: a refresh takes no time, which keeps most timelines simple)."""
         self.data = root / "data"
         self.paths = DataPaths(self.data).ensure_dirs()
         self.store = SettingsStore(self.paths.settings_file)
@@ -232,6 +263,9 @@ class Rig:
         self.db = Database(self.paths.db_file)
         self.display = display or RecordingDisplay(self.data)
         self.clock = clock or FakeClock()
+        self.display.clock = self.clock
+        if show_seconds:
+            self.display.show_seconds = show_seconds
         self.apps = dict(apps) if apps is not None else fake_apps()
         self.sched = self.new_scheduler()
 
@@ -288,7 +322,7 @@ class Rig:
 
 @pytest.fixture
 def make_rig(tmp_path: Path) -> Iterator[Callable[..., Rig]]:
-    """``make_rig(settings_patch, apps=..., display=...)`` -> a fresh ``Rig``."""
+    """``make_rig(settings_patch, apps=..., display=..., show_seconds=...)`` -> a fresh ``Rig``."""
     rigs: list[Rig] = []
 
     def factory(settings: Mapping[str, Any] | None = None, **kw: Any) -> Rig:

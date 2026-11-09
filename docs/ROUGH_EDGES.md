@@ -8,14 +8,13 @@ the file to look at. Items leave this list when they are fixed; `CHANGELOG.md` h
 
 ### Scheduler and state (`inkframe/scheduler.py`)
 
-- Deleting or excluding the photo on the panel does not change the panel until its dwell ends (by design; `api/photos.py` `_delete_job`).
+- Deleting or excluding the photo on the panel does not change the panel until its `minutes_each` ends (by design; `api/photos.py` `_delete_job`).
 - Show-now requests live in memory only (`_pending`), so a restart drops a pending one.
 - An NTP step followed by a restart within 300 s is never folded into the persisted anchors, so the floor or show-now minimum can be short by the step across that restart (`_observe_clock`; docs/SCHEDULER.md, Known limitations).
 - `last_frame.bin` and `frame_rotation` are written in two steps, and `_persist_frame` returns None when the PNG write fails after the bin was written; either way a crash after a rotation change can make the next keep-alive draw the frame upside down.
 - A render that kills the process (a segfault in `dither.c`, an OOM kill) is re-planned after every systemd restart: `_plan` prefers the due rotation item over the keep-alive re-show and there is no "render in progress" marker.
 - While the render executor is held by a long job, each scheduler render waits out `RENDER_TIMEOUT_SECONDS` (180 s) in turn, so a due keep-alive can slip by several slots x 180 s before the 60 s backoff lets the re-show through (`_plan`, `_render`).
 - `/api/status` lists the photos once or twice per poll to compute current and next (`snapshot` via `_rotation_plan`): fine for hundreds of photos, not thousands; each refresh also costs 3 to 4 small SQLite transactions (SD wear).
-- A fractional `dwell_minutes` stored through `/api/settings` (2.5) comes back from `GET /api/rotation` as is and is refused by `PUT /api/rotation` as not whole, so GET then PUT is a 422 (`api/rotation.py`).
 - `render_to_frame` returns the dither engine's output unchecked; the scheduler validates every frame, the app preview endpoint trusts the engine (`apps/base.py`, `api/apps.py` `render_preview_png`).
 - On a DST night `quiet_window_active`'s `until` can be an hour early in real time; the scheduler wakes, sees the window still active and waits again (self-correcting).
 - `show_now(photo_id=...)` reads the row on the API thread: a recipe that is not JSON gives a 422 with the decoder's message and a failing database a 500, neither a clean 404.
@@ -51,7 +50,7 @@ the file to look at. Items leave this list when they are fixed; `CHANGELOG.md` h
 
 ### UI (`inkframe/static/`)
 
-- `panel.show_now_min_seconds` has no UI field, the Rotation view can add an app slot but not remove one (switch it off instead), and there is no in-app light/dark switch (`js/rotation.js`, `app.css`).
+- `panel.show_now_min_seconds` has no UI field, the Rotation view lists every app as a card (switch one off rather than removing it), and there is no in-app light/dark switch (`js/rotation.js`, `app.css`).
 - No automated browser tests: all UI QA was manual in Chromium device emulation at 375/390/768/1280 px (`tests/test_static.py` checks only imports and the 300 KB budget).
 - Screenshots in `docs/ui/` have mixed resolutions, nothing regenerates them or `docs/previews/`, the headlines previews are live data of 19 Oct 2026, and the desktop and storage Settings shots were removed because they showed a Windows home path.
 - `/docs` (FastAPI's Swagger page) loads its assets from a CDN, so it only renders with internet (`app.py`).

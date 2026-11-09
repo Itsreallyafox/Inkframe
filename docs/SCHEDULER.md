@@ -5,6 +5,16 @@ the frame shows and when. It also enforces the panel-care rules from plan
 section 2 in code, whatever the settings say. This note covers the decision
 order, the state it keeps, and the timing rules, with a few worked timelines.
 
+The settings describe a *cycle*: `rotation.photos` (`enabled`, `in_a_row`,
+`minutes_each`, `order`) and `rotation.apps`, an ordered list of cards
+(`app_id`, `enabled`, `minutes`). One cycle is `in_a_row` photos back to
+back, then every enabled card once, in order. The scheduler works on a slot
+list derived from the settings (`_slots`): the photo stream is always slot
+0 and the cards follow in list order, so the position state, show-now,
+keep-alive and failure handling below are those of 0.1. "Slot" is the
+internal word for one entry of that list; the UI and README say photos
+and cards.
+
 ## The rules, and where they live
 
 | Rule | What it means | Where |
@@ -14,7 +24,7 @@ order, the state it keeps, and the timing rules, with a few worked timelines.
 | R3 keep-alive | The panel refreshes at least every `panel.keepalive_hours` (default 20), also while paused or in quiet hours, by re-showing the frame already on it. The rotation does not move. The keep-alive is a refresh, so it waits for the floor; the settings therefore reject a floor longer than the keep-alive interval (`refresh_floor_seconds <= keepalive_hours * 3600`), which would otherwise postpone it. | `_keepalive_deadline`, `_keepalive`, `_plan` step (b), `PanelSettings` |
 | R4 power | Every refresh is `init()`, then `clear()` if `display.clear_before_refresh`, then `show()`, with `sleep()` in a `finally`. Nothing else in the process touches the panel; previews render to PNG only. | `_refresh` |
 | R5 quiet hours | No scheduled rotation refreshes and the last image stays. Keep-alive and show-now still work. | `quiet_window_active`, `_plan` step (d) |
-| R6 robustness | A render that raises (any `BaseException`, `SystemExit` included) or returns an invalid frame is logged with its traceback and its slot is skipped before the panel is touched; the next slot is tried a second later. A render that times out, and a photos slot whose photo list cannot be read, are skipped the same way. If every slot fails, the scheduler waits 60 s. A display error is logged and counts as an attempt; afterwards the panel's content counts as unknown, so the next rotation change repaints it even with the same image. A failing database read never stops planning, so the keep-alive still fires. The thread never dies and the panel is never blanked. | `_show_item`, `_render`, `_skip_after_failure`, `_db_read`, `_refresh`, `_run` |
+| R6 robustness | A render that raises (any `BaseException`, `SystemExit` included) or returns an invalid frame is logged with its traceback and its slot is skipped before the panel is touched; the next slot is tried a second later. A render that times out, and a photos slot whose photo list cannot be read, are skipped the same way. A photo that fails to render inside the stream does not end the run: it is left out for the rest of the run and the next photo is tried a second later; the stream is skipped only when no other included photo is left to try. If every slot fails, the scheduler waits 60 s. A display error is logged and counts as an attempt; afterwards the panel's content counts as unknown, so the next rotation change repaints it even with the same image. A failing database read never stops planning, so the keep-alive still fires. The thread never dies and the panel is never blanked. | `_show_item`, `_render`, `_skip_after_failure`, `_db_read`, `_refresh`, `_run` |
 | R7 persistence | Rotation position, timing anchors, recent photos and the last frame survive a restart. Unreadable state, even a row that is not JSON, gives defaults instead of stopping the boot. | `SchedulerState`, `_load_state`, `_read_state`, `_save`, `_persist_frame` |
 
 ## Threading model
@@ -122,20 +132,36 @@ applies those on top.
 - **The slot has not shown its first frame yet.** This covers a fresh start, a
   slot that was disabled or removed, and the next slot after a render
   failure. The slot is due immediately.
-- **App slot.** The slot ends at `slot_started_at + duration_minutes`. Then
-  the next **enabled** slot is entered (cyclically, possibly the same slot
-  again). Its app is rendered again, so a weather-only rotation updates.
-- **Photos slot** (`options.dwell_minutes`, default 3; `options.order`,
-  `shuffle` or `sequential`, default `shuffle`):
-  - The photo changes at `photo_started_at + dwell`. A change is skipped if
-    the next refresh after it could not come before the slot's end, that is
-    if `max(change, floor_at) + floor > slot_end`. This stops a photo change
-    from making the slot overrun.
+- **Card.** The card ends at `slot_started_at + minutes`. Then the next
+  **enabled** slot is entered (cyclically, possibly the same card again).
+  Its app is rendered again, so a weather-only rotation updates.
+- **Photo stream** (`in_a_row`, default 6; `minutes_each`, default 3;
+  `order`, `shuffle` or `sequential`, default `shuffle`):
+  - Entering the stream shows a photo and sets `photos_shown` to 1. Each
+    further photo comes at `photo_started_at + minutes_each` and adds one.
+    Once `photos_shown >= in_a_row`, the next change leaves the stream for
+    the first enabled card. The run is a **count**, not a duration: a 19 s
+    refresh or a floor longer than `minutes_each` stretches a photo and
+    never costs one. (0.1 skipped a photo change whose refresh could not
+    fit before the slot's minutes were up; that rule is gone.)
   - With no included photos, the photos app renders its "no photos" card
-    (`item_id=None`) and the slot lasts one dwell.
-  - With one photo, or when the rotation loops back to the photo already on
-    the panel, nothing is refreshed. The timers restart instead, so the panel
-    does not flicker for an identical image. The exception is a **stale**
+    (`item_id=None`) and the stream lasts one `minutes_each`. If the list
+    cannot be read, the stream is skipped like a failed render (see
+    Failures); inside a run, the photo on the panel stays until the next
+    change, which moves on to the cards.
+  - A photo that fails to render (a corrupt master, a timeout) is not
+    counted and does not end the run: it is left out of the picks for the
+    rest of the run and the next photo is tried a second later, so the run
+    still shows `in_a_row` photos. When no other included photo is left to
+    try (every photo failed in this run, or only the one on the panel
+    remains with nothing else: it then repeats silently, as with a single
+    photo), the stream is skipped like any failed slot (see Failures). The
+    next run tries every photo again.
+  - With one photo, or when the pick lands on the photo already on the
+    panel, nothing is refreshed. The timers restart instead, so the panel
+    does not flicker for an identical image, and the repeat still counts
+    toward `in_a_row`, so a single photo "shows" `in_a_row` times and the
+    run keeps its length. The exception is a **stale**
     panel (`panel_stale`): after a failed or interrupted attempt its content
     is unknown (white, if `clear()` worked and `show()` did not), and after
     `invalidate()` the photo would render differently (Phase 3: a new
@@ -143,17 +169,23 @@ applies those on top.
     same photo. A keep-alive re-show of the last frame leaves the flag set.
   - `sequential` walks included photos by `(created_at, id)`, cycling. It
     continues after the most recent photo picked, whether that photo was shown
-    or failed, so a broken photo is walked past. If that photo was deleted, it
-    continues after the newest earlier pick that still exists.
+    or failed, so a broken photo is walked past (and left out of the walk for
+    the rest of the run). If that photo was deleted, it continues after the
+    newest earlier pick that still exists.
   - `shuffle` picks uniformly among included photos that are not among the
     last `min(n - 1, 20)` picks. It never picks the photo on the panel while
     another one exists. The pick is reserved (`next_photo_id`), so the "next"
     the UI shows is the photo that actually comes next.
 - **Rotation edits.** The state remembers the slot's index **and** its app
-  id. If the slot moves (slots inserted or reordered), the scheduler follows
-  it by app id and keeps its timing. If it is disabled or removed, the next
-  enabled slot starts fresh, at the floor. Slots whose app is unknown or
-  failed to load are skipped. With no enabled slots, only the keep-alive runs.
+  id. If a card moves in the list, the scheduler follows it by app id and
+  keeps its timing. If the current card is disabled or removed, the next
+  enabled slot starts fresh, at the floor. Lowering `in_a_row` to or below
+  `photos_shown` ends the run at the next change; raising it extends the
+  run. A state saved by 0.1 has no `photos_shown` (read as 0), so a run in
+  progress at the upgrade continues for a full `in_a_row`. Cards whose app
+  is unknown or failed to load are skipped. With photos disabled the cards
+  cycle alone; with no enabled cards one run follows the next with a fresh
+  pick; with nothing enabled, only the keep-alive runs.
 
 ### Show now
 
@@ -162,12 +194,13 @@ applies those on top.
 - `show_next()` queues `{kind: "next"}`. When it fires, it shows exactly the
   item `snapshot()["rotation"]["next"]` announced, and the rotation advances
   as if that item had come up on schedule.
-- If the requested app or photo has an enabled slot in the rotation, the
-  rotation **jumps** there and starts that slot now, unless that slot is the
-  one already running: an app then keeps the slot's timing, and a photo shown
-  inside the running photos slot only restarts the photo's dwell. If it
-  has no slot, the rotation timing is left alone, and the next rotation change
-  comes when it was due anyway (and no earlier than the floor).
+- If the requested app is an enabled card, the rotation **jumps** there and
+  starts that card now, unless it is the card already running, which keeps
+  its timing. A requested photo enters the photo stream (when enabled) and
+  **restarts the run**: it counts as photo 1 of `in_a_row`, also when the
+  stream was already running. If the app has no enabled card, or the stream
+  is disabled, the rotation timing is left alone, and the next rotation
+  change comes when it was due anyway (and no earlier than the floor).
 - `fires_at = max(now, last_attempt + show_now_min_seconds)`, with
   `last_attempt` measured on both clocks as for the floor. It is reported in
   `rotation.pending` for the UI countdown and is recomputed whenever an attempt
@@ -211,6 +244,17 @@ clock of `now`, also for anchors read back from disk, which are UTC.
   `tick` returns 1 s. The panel keeps its frame. When every enabled slot has
   failed, the set is cleared, a 60 s backoff starts, and the next pass begins
   with the following slot. Any successful refresh clears the set.
+- **Broken photo.** A photo that fails to render while entering the stream
+  or at a photo change is recorded the same way (`last_error`, the walk
+  moves past it) but the stream is not skipped: the photo joins this run's
+  "failed photos" set, the run's position (`photos_shown`, the timers) is
+  untouched and `tick` returns 1 s, so the next tick picks another photo
+  (the change is due already). The set is cleared when a slot is entered,
+  so every photo is tried again in the next run. Only when no included
+  photo outside the set is left (an unreadable or empty list, or every
+  photo failed) does the stream join the failed-slot set as above, so an
+  all-broken library backs off instead of spinning. A keep-alive re-render
+  of the photo on the panel that fails still skips the slot.
 - **Invalid frame.** Every render result goes through `validate_frame` on
   the render thread, before the panel is touched. `render_to_frame` checks
   index arrays and undithered RGB, but passes the dither engine's output
@@ -238,9 +282,9 @@ clock of `now`, also for anchors read back from disk, which are UTC.
   Planning and `snapshot()` never raise because of it. The first failure of
   each kind of read is logged with its traceback, and its recovery once. If
   the photo list cannot be read, the photos slot fails like a render that
-  raised (`last_error.message` says why), so it is skipped and the other
-  slots and the keep-alive carry on. Inside a running photos slot, the photo
-  on the panel stays until the slot ends. `/api/status` reports an
+  raised (`last_error.message` says why), so it is skipped and the cards
+  and the keep-alive carry on. Inside a photo run, the photo on the panel
+  stays until the next change, which enters the first card. `/api/status` reports an
   unreadable mirror key as the scheduler's own value, or `null`.
 - Pausing, or quiet hours starting, while a slow render is in flight: the
   rendered frame is dropped and the panel is not refreshed.
@@ -295,9 +339,10 @@ read back after a restart is never short.
 
 | Field | Meaning |
 |---|---|
-| `slot_index`, `slot_app_id` | rotation position: the index into `settings.rotation` and the app id it had when the slot started |
+| `slot_index`, `slot_app_id` | rotation position: the index into the derived slot list (`_slots`: the photo stream, then `rotation.apps`) and the app id it had when the slot started |
 | `slot_started_at` | when the slot's first frame appeared; `null` means the slot has not shown yet, so it is due |
-| `photo_id`, `photo_started_at` | the photo the photos slot is showing; the dwell anchor |
+| `photo_id`, `photo_started_at` | the photo the stream is showing; the `minutes_each` anchor |
+| `photos_shown` | photos shown in the current run, silent repeats of one photo included: `1` on entering the stream, compared with `in_a_row` at every change. Missing from a 0.1 state: `0` |
 | `recent_photo_ids` | the last 50 photo picks (shown or failed), newest last |
 | `next_photo_id` | the reserved shuffle pick |
 | `last_refresh_at`, `last_attempt_at` | end of the last successful refresh and end of the last attempt. `last_attempt_at` is also written just **before** the panel is touched (after the render, not at the start of the tick), so a crash or power cut mid-refresh still counts from the right moment |
@@ -316,7 +361,7 @@ restarted scheduler keeps the frame alive from `last_frame.bin`.
 Loading is tolerant: a missing or invalid blob gives defaults. So does a row
 that is not JSON at all (a torn write, SD-card bit rot) or a failing database;
 the next save rewrites it. The two mirror keys fill gaps, `slot_index` is
-clamped to the current rotation length, and a deleted current photo is
+clamped to the slot list's length, and a deleted current photo is
 dropped. The paused flag lives in `settings.paused`, not here.
 
 The floor and the show-now minimum must survive a lost anchor. A missing (or
@@ -332,20 +377,40 @@ or a frame left by Phase 1) gets no stand-in.
 
 Default floor 180 s; times are minutes after the first refresh.
 
-**Photos 10 min (dwell 3), then Weather 3 min, two photos:**
+**Photos 6 in a row, 3 min each, then Weather 3 min and Headlines 3 min; a
+refresh takes 19 s:**
 
 ```
- 0:00  photo A        (slot starts; the floor runs to 3:00)
- 3:00  photo B        (dwell)
- 6:00  photo A
- 9:00  -              (a change now could not be replaced before 12:00 > 10:00)
-10:00  weather        (the slot's 10 minutes are up)
-13:00  photo B        (weather's 3 minutes; back to photos)
+ 0:00  photo A appears (the stream is entered; photos_shown 1)
+ 3:19  photo B         (minutes_each after A appeared; 2)
+ 6:38  photo C         (3)
+ 9:57  photo D         (4)
+13:16  photo E         (5)
+16:35  photo F         (6 = in_a_row)
+19:54  weather         (the run is complete; the cards in list order)
+23:13  headlines
+26:32  photo G         (a new run; shuffle avoids the recent picks)
 ```
 
-**Quotes 2 min, Patterns 2 min, floor 180 s.** Slots shorter than the floor
+Every change is `minutes_each` after the previous photo **appeared**, so the
+refreshes stretch the cycle (about 19 s per refresh) and never drop a photo.
+
+**One photo, 6 in a row:** the photo appears at 0:00; at 3:00, 6:00, 9:00,
+12:00 and 15:00 the pick is the same photo, nothing is refreshed and the
+timers restart; the change at 18:00 goes to the first card. **No photos:**
+the "no photos" card at 0:00, the first card at 3:00.
+
+**Show next with photo 2 of 6 on the panel:** the announced next is photo 3
+and the run continues (3 of 6); after photo 6 it is the first card. **Show
+now of a photo** at any point: it appears (after the show-now minimum) as
+photo 1 of a fresh run, so the cards come `in_a_row` photos later. **Show now
+of a card** jumps to that card; the cards after it follow in order, then a
+new run.
+
+**Quotes 2 min, Patterns 2 min, floor 180 s.** Cards shorter than the floor
 last until the floor allows the next refresh: Quotes at 0:00, Patterns at 3:00,
-the next slot at 6:00.
+the next card (or the photo stream) at 6:00. A `minutes_each` of 1 stretches
+the same way: each photo lasts the floor, and the run still counts `in_a_row`.
 
 **Quiet hours 23:00–07:00, keep-alive 20 h, last rotation refresh 22:59:**
 nothing between 23:00 and 07:00. At 07:00 the rotation resumes with the next
@@ -362,10 +427,10 @@ and still fires at 0:30. Any later rotation refresh waits for the floor from
 unchanged, the next attempt is at 3:00 (never sooner), and the item is
 retried then.
 
-**One photo, Photos 10 min, `clear_before_refresh`, a show-now of that photo
-fails at 0:05 after `clear()` worked:** the panel is white and stale. At
-0:10 the slot's next visit would normally skip the same photo; it re-renders
-and refreshes it instead, and the panel is repaired.
+**One photo, `clear_before_refresh`, a show-now of that photo fails at 0:05
+after `clear()` worked:** the panel is white and stale. The next change would
+normally keep the same photo without a refresh; it re-renders and refreshes
+it instead, and the panel is repaired.
 
 ## API
 
@@ -377,8 +442,8 @@ All routes are JSON, and errors are `{"error": ...}`. Display routes reply with
 | `POST /api/display/next` | `show_next()` |
 | `POST /api/display/pause` / `resume` | persist `settings.paused`, wake |
 | `POST /api/display/show` | body `{"app_id"}` or `{"photo_id"}`; with `app_id` an optional integer `"variant"` forces one of the app's layouts (the Settings test card is `{"app_id": "patterns", "variant": 2}`). Unknown id: 404. Both, neither, extra keys, a non-string, or a variant that is out of range or given with `photo_id`: 422 |
-| `GET /api/rotation` | `{slots: [{app_id, enabled, duration_minutes, options, name, description}], paused, quiet_hours, apps}`. The photos options are exactly `dwell_minutes` and `order`, as the scheduler reads them (defaults filled in); other keys that `/api/settings` stored are left out, so a GET body can be PUT back |
-| `PUT /api/rotation` | `{"slots": [...], "paused"?}`. Replaces the whole list. App ids must be known; photos options are `dwell_minutes` (whole number, 1–1440) and `order` (`shuffle` or `sequential`). Everything is validated through `Settings.merged`, and `name`/`description` from the GET shape are ignored. Invalid input: 422 and nothing changes. Wakes the scheduler |
+| `GET /api/rotation` | `{photos: {enabled, in_a_row, minutes_each, order}, apps: [{app_id, enabled, minutes, name, description}], paused, quiet_hours}`. `apps` lists the stored cards in order, then every other registered app (photos excepted) switched off with 2 minutes, so the UI needs no "add" control; a stored id that is no longer registered keeps its row with the id as its name. Its `photos` and `apps` can be PUT back as they are (the PUT body has no `quiet_hours`) |
+| `PUT /api/rotation` | `{"photos"?, "apps"?, "paused"?}`, at least one of `photos`/`apps`. `photos` is merged key by key; `apps` replaces the whole list (every id must be a registered app or one already stored, so a card whose app a later release removed can still be saved until it is dropped: `apps[2].app_id: unknown app 'x'; known: ...`; `photos` is refused: `rotation.apps[i].app_id: photos belongs in rotation.photos`). Everything is validated through `Settings.merged` and the error names the field (`rotation.apps[2].minutes must be between 1 and 1440, got 0`); `name`/`description` from the GET shape are ignored. Invalid input: 422 and nothing changes. Wakes the scheduler |
 | `GET /api/apps` | `[{id, name, description, needs_dither, variants, settings_schema, settings}]` |
 | `GET/PUT /api/apps/{id}/settings` | PUT takes a partial body, merges it over the stored settings and validates the result with the app's schema (422 with the message if it fails). Only keys the user set are stored, so a required field left unset, such as the weather location, keeps prompting |
 | `GET /api/apps/{id}/preview.png?variant=&seed=` | renders on the render executor, never the panel, with the scheduler's `RenderContext`. Returns a PNG in the measured palette with `Cache-Control: no-store`. App failure: 500. Bad `variant` or `seed`: 422. The photos preview uses the current photo, else the first included photo |
@@ -396,7 +461,7 @@ All routes are JSON, and errors are `{"error": ...}`. Display routes reply with
 "rotation": {"paused": false, "quiet": false, "quiet_until": null,
              "current": {"app_id": "photos", "label": "Photos", "photo_id": null,
                          "started_at": "2026-10-19T20:54:00.147+00:00",
-                         "ends_at": "2026-10-19T21:04:00.147+00:00"},
+                         "ends_at": "2026-10-19T20:57:00.147+00:00"},
              "next": {"app_id": "weather", "label": "Weather", "photo_id": null},
              "next_at": "2026-10-19T20:57:00.147+00:00",
              "keepalive_at": "2026-10-20T16:54:00.147+00:00",
@@ -404,7 +469,9 @@ All routes are JSON, and errors are `{"error": ...}`. Display routes reply with
 ```
 
 `current` is `null` until the rotation's current slot has shown its first
-frame. `next_at` is `null` while paused or when no slot is enabled.
+frame. For the photo stream, `current.ends_at` is an estimate: the photos
+left in the run (one for the "no photos" card) at `minutes_each` each.
+`next_at` is `null` while paused or when no slot is enabled.
 `keepalive_at` is never earlier than the floor allows.
 
 ## Hooks for Phase 3
@@ -420,7 +487,7 @@ frame. `next_at` is `null` while paused or when no slot is enabled.
   fields changes nothing and calls nothing), and `PUT /api/recipe/default`
   calls `invalidate()` with no id (any photo that follows the default may
   render differently) and then `wake()`.
-- `current_photo_id()`: the photo the photos slot is showing.
+- `current_photo_id()`: the photo the photo stream is showing.
 
 ## Known limitations
 

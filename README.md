@@ -161,7 +161,7 @@ from a CDN. Screenshots are in `docs/ui/`; the design notes are `docs/UI.md`.
 | Now | The last frame exactly as the panel shows it, what is showing and what is next with a countdown, Show next, Pause / Resume, panel state, last refresh and keep-alive times. |
 | Photos | Grid of the dithered renders, drop zone and file picker with per-file progress and browser-side downscale, portrait and excluded badges, Show / Exclude / Delete per photo. |
 | Editor (`#/photos/<id>`) | Large preview, a strip of all 12 dither methods (Detail or Whole), sliders for strength, brightness, contrast, saturation, gamma and sharpen, serpentine and distance toggles, zoom, Save / Make default / Reset / Show on panel. |
-| Rotation | Drag-to-reorder app slots with on/off and minutes, photos slot (minutes per photo, shuffle or sequential), cycle timeline, quiet hours, refresh floor, keep-alive, clear-before-refresh. |
+| Rotation | Photos in a row (how many, minutes each, shuffle or in order), then the cards: every app with on/off and minutes, drag-to-reorder; a cycle strip with the cycle length, the photo share and how often each card comes round, live; quiet hours, refresh floor, keep-alive, clear-before-refresh. |
 | Apps | A form per app generated from its settings schema, with a preview image that never touches the panel. |
 | Settings | Palette editor and test card, panel rotation, storage use, log tail, restart. |
 
@@ -219,7 +219,7 @@ time budget.
 
 | App | What | Settings |
 |---|---|---|
-| Photos | Your uploaded photos, with their recipes. A "No photos yet" card when there are none. | Per slot: `dwell_minutes` (default 3), `order` (`shuffle` default, or `sequential`). Shuffle avoids the last `min(n - 1, 20)` photos. |
+| Photos | Your uploaded photos, with their recipes. A "No photos yet" card when there are none. | Under `rotation.photos`: `in_a_row` (default 6), `minutes_each` (default 3), `order` (`shuffle` default, or `sequential`). Shuffle avoids the last `min(n - 1, 20)` photos. |
 | Weather | Open-Meteo: now, next hours, five days; three layouts. Forecast cached 15 min, geocoding cached forever. A transient failure (connection error or 5xx) is retried once after 2 s within the same time budget; if the refresh still fails for any reason, a lost Wi-Fi connection included, the last forecast is shown with a red "couldn't update" stamp; the red "offline" stamp appears only when network use is switched off (`INKFRAME_OFFLINE=1`). | `location` (place name or `lat,lon`; required), `units` (`metric`/`imperial`; imperial also uses a 12-hour clock), `layout` (`rotate` = a different one each hour, `now`, `days`, `poster`), `label`. |
 | Headlines | RSS/Atom top stories set like a front page; three layouts. Feeds fetched in parallel (9.5 s cap), cached 15 min; a transient failure (connection error or 5xx) is retried once after 2 s within the same cap; stale data is shown with a red "offline" note. | `feeds` (one URL per line, optional short name before it; default BBC, NYT, Guardian), `count` (3-8), `max_age_hours` (1-72), `mix` (`interleave`/`by_feed`). |
 | Patterns | Generative prints: Truchet, Bauhaus, halftone, flow field, concentric, plus the palette test card. No network. | `family` (`random`, the five, or `test_card`), `density` (1-5), `palette_mood` (`full`, `duotone`, `warm`, `cool`), `caption`. |
@@ -235,6 +235,11 @@ edited in the Apps view or with `PUT /api/apps/{id}/settings`.
 enforces the vendor's care rules in code, whatever the settings say. Design
 notes, worked timelines and the full decision order: `docs/SCHEDULER.md`.
 
+- **The cycle.** `rotation.photos.in_a_row` photos back to back (default 6,
+  `minutes_each` 3), then every enabled card in `rotation.apps` once, in order,
+  then photos again. The run is a count: a 19 s refresh or the floor stretches
+  a photo, never drops one. "Show now" of a photo starts a fresh run; of a card,
+  jumps to it and the cards after it follow.
 - **Refresh floor.** Two refreshes are never closer than
   `panel.refresh_floor_seconds` (default 180 s, never below 30), measured from
   the end of the last attempt on both the wall and the monotonic clock. A
@@ -252,7 +257,8 @@ notes, worked timelines and the full decision order: `docs/SCHEDULER.md`.
 - **Power.** Every refresh is `init()`, optional `clear()`, `show()`, with
   `sleep()` in a `finally`. A refresh in flight finishes on shutdown.
 - **Robustness.** A render that raises or returns an invalid frame is logged
-  and its slot skipped before the panel is touched; if every slot fails the
+  and its turn skipped before the panel is touched (a photo that fails is left
+  out of the current run and the next one is tried); if everything fails the
   scheduler backs off 60 s. A display failure counts as an attempt and the
   panel is repainted at the next rotation change. State (rotation position,
   timing anchors, recent photos, the last frame) survives a restart.
@@ -262,8 +268,9 @@ notes, worked timelines and the full decision order: `docs/SCHEDULER.md`.
 
 **`<data>/settings.json`** is created with defaults on first start. An invalid
 file is moved aside to `settings.json.invalid` and defaults are used. It is
-the same object as `GET/PUT /api/settings`; a PUT deep-merges (lists such as
-`rotation` and `quiet_hours.days` are replaced whole) and unknown keys are a 422.
+the same object as `GET/PUT /api/settings`; a PUT deep-merges (`rotation.photos`
+merges by key; lists such as `rotation.apps` and `quiet_hours.days` are replaced
+whole) and unknown keys are a 422.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -276,7 +283,8 @@ the same object as `GET/PUT /api/settings`; a PUT deep-merges (lists such as
 | `palette.measured` | see `inkframe/display/palette.py` | The six `[r, g, b]` colours the panel shows. |
 | `palette.use_measured` | `true` | Global switch: when off, every photo renders against the nominal primaries whatever its recipe says. |
 | `default_recipe` | atkinson / 0.85 / lab / measured | The recipe photos follow. |
-| `rotation` | photos 10 min (3 per photo, shuffle), weather 3, headlines 3, quotes 2, patterns 2 | Up to 32 slots of `{app_id, enabled, duration_minutes (1-1440), options}`. |
+| `rotation.photos` | `{enabled: true, in_a_row: 6, minutes_each: 3, order: "shuffle"}` | The photo stream: how many photos show back to back (1-200) and for how long each (1-1440 min). |
+| `rotation.apps` | weather 3, headlines 3, quotes 2, patterns 2 | The cards, in order, each `{app_id, enabled, minutes (1-1440)}`; up to 32, ids unique, `photos` not allowed. One cycle is `in_a_row` photos, then every enabled card once (the default is 28 min, 64% photos). A 0.1 `settings.json` with the old slot list is converted on load (the photos slot's `duration_minutes / dwell_minutes` becomes `in_a_row`, capped at 200, app slots keep their minutes) and saved in the new shape. |
 | `paused` | `false` | Rotation paused (keep-alive still runs). |
 
 **Environment variables**
@@ -300,7 +308,7 @@ hex characters. `/docs` is FastAPI's Swagger page and needs internet for its ass
 | `GET /api/system/logs?n=200`, `POST /api/system/restart` | last log lines (ring of 500); stop the process so systemd restarts it |
 | `GET/PUT /api/settings` | the settings tree |
 | `GET /api/display/frame.png`, `POST /api/display/next\|pause\|resume\|show` | the panel's last frame; scheduler controls (`show` takes `{app_id[, variant]}` or `{photo_id}`) |
-| `GET/PUT /api/rotation` | slots (validated more strictly than `/api/settings`) |
+| `GET/PUT /api/rotation` | the photo stream and the cards, every registered app listed (validated more strictly than `/api/settings`) |
 | `GET /api/apps`, `GET/PUT /api/apps/{id}/settings`, `GET /api/apps/{id}/preview.png?variant=&seed=` | apps, their forms and previews |
 | `GET/POST /api/photos`, `GET/DELETE /api/photos/{id}`, `GET /api/photos/{id}/render[?recipe=<key>]`, `POST /api/photos/{id}/previews`, `PUT /api/photos/{id}/recipe`, `PUT /api/photos/{id}/flags` | photos |
 | `GET/PUT /api/recipe/default` | default recipe plus the method registry and knob limits |

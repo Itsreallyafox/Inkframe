@@ -223,11 +223,49 @@ def test_settings_partial_put_merges(client: TestClient, data_dir: Path) -> None
 
 def test_settings_full_put_round_trips(client: TestClient) -> None:
     current = client.get("/api/settings").json()
-    current["rotation"] = current["rotation"][:2]
+    current["rotation"]["apps"] = current["rotation"]["apps"][:2]
+    current["rotation"]["photos"]["in_a_row"] = 9
     current["quiet_hours"]["days"] = [5, 6]
     r = client.put("/api/settings", json=current)
     assert r.status_code == 200
     assert r.json() == current
+
+
+def test_settings_put_accepts_the_0_1_rotation_list(client: TestClient, data_dir: Path) -> None:
+    """A 0.1 slot list under ``rotation`` replaces the whole section and is
+    converted: 10 minutes at 3 per photo is 3 in a row; the file is saved in
+    the new shape."""
+    legacy = [
+        {"app_id": "quotes", "enabled": True, "duration_minutes": 5, "options": {}},
+        {
+            "app_id": "photos",
+            "enabled": True,
+            "duration_minutes": 10,
+            "options": {"dwell_minutes": 3, "order": "sequential"},
+        },
+        {"app_id": "weather", "enabled": False, "duration_minutes": 3},
+    ]
+    r = client.put("/api/settings", json={"rotation": legacy})
+    assert r.status_code == 200, r.text
+    assert r.json()["rotation"] == {
+        "photos": {"enabled": True, "in_a_row": 3, "minutes_each": 3, "order": "sequential"},
+        "apps": [
+            {"app_id": "quotes", "enabled": True, "minutes": 5},
+            {"app_id": "weather", "enabled": False, "minutes": 3},
+        ],
+    }
+    on_disk = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk["rotation"] == r.json()["rotation"]
+    # a partial new-shape patch keeps the rest of the section
+    r = client.put("/api/settings", json={"rotation": {"photos": {"in_a_row": 4}}})
+    assert r.status_code == 200, r.text
+    assert r.json()["rotation"]["photos"]["in_a_row"] == 4
+    assert r.json()["rotation"]["photos"]["order"] == "sequential"
+    assert [a["app_id"] for a in r.json()["rotation"]["apps"]] == ["quotes", "weather"]
+    r = client.put(
+        "/api/settings", json={"rotation": [{"app_id": "photos", "duration_minutes": 0}]}
+    )
+    assert r.status_code == 422 and "rotation[0].duration_minutes" in r.json()["error"]
 
 
 @pytest.mark.parametrize(

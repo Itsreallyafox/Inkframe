@@ -2571,7 +2571,22 @@ kbd {
   display: flex;
   gap: 3px;
   height: 48px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+}
+
+.cycle-summary {
+  margin-top: 0;
+}
+
+/* the photo run: a lighter top rule than the cards, and its name survives a
+   narrow segment (it has no list number to fall back on) */
+.cycle-seg.cycle-photos {
+  border-top-color: var(--rule-strong);
+  background: var(--sunk);
+}
+
+.cycle-seg.cycle-photos.narrow .cycle-name {
+  display: block;
 }
 
 .cycle-seg {

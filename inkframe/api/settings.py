@@ -24,8 +24,9 @@ def update_settings(
     """Deep-merge a full or partial settings object over the current settings
     and return the saved result.
 
-    Nested objects merge key by key; lists (``rotation``, ``quiet_hours.days``)
-    are replaced whole.  Unknown keys or invalid values: 422 with the reason.
+    Nested objects merge key by key; lists (``rotation.apps``, ``quiet_hours.days``)
+    are replaced whole, and the 0.1 ``rotation`` slot list is still accepted and
+    converted.  Unknown keys or invalid values: 422 with the reason.
     The scheduler is woken so a new floor, quiet window or rotation applies now;
     a palette or default-recipe change also marks the panel stale so the photo on
     it is repainted at the next rotation change.

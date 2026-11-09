@@ -29,7 +29,7 @@ inkframe/static/
   js/now.js         Now
   js/photos.js      Photos (grid, actions, uploader)
   js/editor.js      Photo editor
-  js/rotation.js    Rotation (slots, drag reorder, quiet hours, panel care)
+  js/rotation.js    Rotation (photo stream, cards with drag reorder, cycle strip, quiet hours, panel care)
   js/apps.js        Apps (generated settings forms, previews)
   js/settings.js    Settings (palette, display, storage, log, restart)
 ```
@@ -61,7 +61,7 @@ hook.
 | Now | `GET /api/status` every 5 s while the tab is visible (paused when hidden), `GET /api/display/frame.png?v=<last_refresh_at>` | `POST /api/display/next`, `/pause`, `/resume` |
 | Photos | `GET /api/photos`, each photo's `render_url`, `GET /api/recipe/default` (method names) | `POST /api/photos` (XHR, multipart), `POST /api/display/show {photo_id}`, `PUT /api/photos/{id}/flags`, `DELETE /api/photos/{id}` |
 | Editor | `GET /api/photos/{id}`, `GET /api/recipe/default` (methods, limits), `POST /api/photos/{id}/previews {knobs, methods}`, `GET /api/photos` (how many photos follow the default) | `PUT /api/photos/{id}/recipe` (knobs, or `{"reset": true}`), `PUT /api/recipe/default`, `POST /api/display/show {photo_id}` |
-| Rotation | `GET /api/rotation`, `GET /api/settings`, `GET /api/apps` (names for "add") | `PUT /api/settings {quiet_hours, panel, display}`, then `PUT /api/rotation {slots}` |
+| Rotation | `GET /api/rotation` (the photo stream and every app as a card), `GET /api/settings` | `PUT /api/settings {quiet_hours, panel, display}`, then `PUT /api/rotation {photos, apps}` |
 | Apps | `GET /api/apps`, `GET /api/apps/{id}/preview.png?variant=&seed=` | `PUT /api/apps/{id}/settings`, `POST /api/display/show {app_id}` |
 | Settings | `GET /api/settings`, `GET /api/status` (display, storage, uptime), `GET /api/system/logs?n=200`, `GET /api/apps/patterns/preview.png?variant=2` | `PUT /api/settings {palette}` / `{display: {rotation}}`, `POST /api/display/show {"app_id": "patterns", "variant": 2}`, `POST /api/system/restart` |
 
@@ -85,8 +85,9 @@ and every answer replaces the draft with what the server stored.
 into an `ApiError` carrying the server's `{"error"}` text. Without `quiet`
 the message is also shown as a toast; views that show errors inline
 (Rotation's 422s, the Apps forms) pass `quiet: true` and place the message
-under the field it names (`rotation[2].duration_minutes ...` marks that
-slot's input). A network failure flips the connection badge to Offline.
+under the field it names (`rotation.apps[2].minutes ...` marks that card's
+input, `rotation.photos.in_a_row ...` the photos field). A network failure
+flips the connection badge to Offline.
 
 There is no login, so the server keeps other web pages out instead (see the
 `inkframe/app.py` docstring): every request but GET/HEAD/OPTIONS must name
@@ -178,9 +179,14 @@ row's offset so it stays under the finger. The new order is read back from
 the DOM on release. The handle also takes ArrowUp/ArrowDown, and each row
 has up/down buttons.
 
-The cycle bar above the slots shows, per segment, as much as fits without
-cutting a word: name and minutes, the name alone, the slot's number from
-the list ("02"), or nothing.
+The cards list has no "add" control: `GET /api/rotation` lists every app,
+switched off when it is not in the stored list. The cycle strip above the
+lists leads with the photo segment (`in_a_row × minutes_each`, one tick
+per photo change, at most 60 ticks), then the enabled cards; each segment
+shows as much as fits without cutting a word: name and minutes, the name
+alone, the card's number from the list ("02"), or nothing. The numbers
+under the strip (cycle length, photo share, how often each card comes
+round) follow the fields as they are edited.
 
 ## Design
 

@@ -333,144 +333,221 @@ def test_scheduler_env_off_keeps_the_thread_stopped(
 
 # --- /api/rotation ------------------------------------------------------------------------
 
+PHOTOS_DEFAULT = {"enabled": True, "in_a_row": 6, "minutes_each": 3, "order": "shuffle"}
+
 
 def test_rotation_get(client: TestClient) -> None:
     r = client.get("/api/rotation")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"slots", "paused", "quiet_hours", "apps"}
-    assert body["apps"] == ["photos", "weather", "headlines", "patterns", "quotes"]
-    assert [s["app_id"] for s in body["slots"]] == [
-        "photos",
-        "weather",
-        "headlines",
-        "quotes",
-        "patterns",
+    assert set(body) == {"photos", "apps", "paused", "quiet_hours"}
+    assert body["photos"] == PHOTOS_DEFAULT
+    assert [(a["app_id"], a["enabled"], a["minutes"]) for a in body["apps"]] == [
+        ("weather", True, 3),
+        ("headlines", True, 3),
+        ("quotes", True, 2),
+        ("patterns", True, 2),
     ]
-    photos = body["slots"][0]
-    assert photos == {
-        "app_id": "photos",
+    assert body["apps"][0] == {
+        "app_id": "weather",
         "enabled": True,
-        "duration_minutes": 10,
-        "options": {"dwell_minutes": 3, "order": "shuffle"},
-        "name": "Photos",
-        "description": "Your uploaded photos",
+        "minutes": 3,
+        "name": "Weather",
+        "description": body["apps"][0]["description"],
     }
-    assert body["slots"][1]["name"] == "Weather" and body["slots"][1]["options"] == {}
+    assert body["apps"][0]["description"]
     assert body["quiet_hours"]["start"] == "23:00" and body["paused"] is False
 
 
-def test_rotation_put_replaces_the_list(client: TestClient, monkeypatch) -> None:
+def test_rotation_get_lists_every_app_and_keeps_unknown_ids(client: TestClient) -> None:
+    """Apps without a stored turn are appended switched off with the default
+    minutes (a new app after an upgrade shows up off); a stored id that is
+    not registered keeps its row, named by its id, and the page can still
+    save: the GET body's apps PUT back as they are, stale row included."""
+    r = client.put(
+        "/api/settings",
+        json={"rotation": {"apps": [{"app_id": "quotes", "minutes": 4}, {"app_id": "radio"}]}},
+    )
+    assert r.status_code == 200, r.text
+    body = client.get("/api/rotation").json()
+    assert [(a["app_id"], a["enabled"], a["minutes"]) for a in body["apps"]] == [
+        ("quotes", True, 4),
+        ("radio", True, 3),
+        ("weather", False, 2),
+        ("headlines", False, 2),
+        ("patterns", False, 2),
+    ]
+    assert body["apps"][1]["name"] == "radio" and body["apps"][1]["description"] == ""
+    assert body["apps"][2]["name"] == "Weather"
+    # the GET body's photos and apps can be PUT back as they are: the stored
+    # but unregistered id passes (it is there already), so an app removed by
+    # a later release does not make the Rotation page unsaveable ...
+    r = client.put("/api/rotation", json={"photos": body["photos"], "apps": body["apps"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["apps"] == body["apps"]
+    assert [t.app_id for t in client.app.state.settings.get().rotation.apps] == [
+        "quotes",
+        "radio",
+        "weather",
+        "headlines",
+        "patterns",
+    ]
+    # ... while an id that is neither registered nor stored is still refused
+    body["apps"].append({"app_id": "television", "enabled": True, "minutes": 2})
+    r = client.put("/api/rotation", json={"apps": body["apps"]})
+    assert r.status_code == 422
+    assert r.json()["error"] == (
+        "apps[5].app_id: unknown app 'television'; known: weather, headlines, patterns, quotes"
+    )
+    body["apps"].pop()
+    # once the stale row is dropped, saving without it stops accepting it
+    body["apps"].pop(1)
+    r = client.put("/api/rotation", json={"apps": body["apps"]})
+    assert r.status_code == 200, r.text
+    assert [a["app_id"] for a in r.json()["apps"]] == ["quotes", "weather", "headlines", "patterns"]
+    r = client.put("/api/rotation", json={"apps": [{"app_id": "radio", "minutes": 2}]})
+    assert r.status_code == 422 and "apps[0].app_id: unknown app 'radio'" in r.json()["error"]
+
+
+def test_rotation_put_happy_path(client: TestClient, monkeypatch) -> None:
     woken = threading.Event()
     monkeypatch.setattr(client.app.state.scheduler, "wake", woken.set)
-    slots = [
-        {"app_id": "quotes", "enabled": True, "duration_minutes": 5},
-        {"app_id": "photos", "duration_minutes": 20, "options": {"dwell_minutes": 4}},
-        {"app_id": "weather", "enabled": False, "duration_minutes": 3, "options": {}},
-    ]
-    r = client.put("/api/rotation", json={"slots": slots, "paused": True})
+    body = {
+        "photos": {"enabled": True, "in_a_row": 4, "minutes_each": 5, "order": "sequential"},
+        "apps": [
+            {
+                "app_id": "quotes",
+                "enabled": True,
+                "minutes": 5,
+                "name": "Quotes",
+                "description": "x",
+            },
+            {"app_id": "weather", "enabled": False, "minutes": 3},
+        ],
+        "paused": True,
+    }
+    r = client.put("/api/rotation", json=body)
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert [s["app_id"] for s in body["slots"]] == ["quotes", "photos", "weather"]
-    assert body["slots"][1]["options"] == {"dwell_minutes": 4, "order": "shuffle"}
-    assert body["slots"][2]["enabled"] is False and body["paused"] is True
+    out = r.json()
+    assert out["photos"] == body["photos"]
+    assert [(a["app_id"], a["enabled"], a["minutes"]) for a in out["apps"]] == [
+        ("quotes", True, 5),
+        ("weather", False, 3),
+        ("headlines", False, 2),
+        ("patterns", False, 2),
+    ]
+    assert out["apps"][0]["name"] == "Quotes" and out["paused"] is True
     assert woken.is_set()
     saved = client.get("/api/settings").json()
     assert saved["paused"] is True
-    assert saved["rotation"][1] == {
-        "app_id": "photos",
-        "enabled": True,
-        "duration_minutes": 20,
-        "options": {"dwell_minutes": 4, "order": "shuffle"},
+    assert saved["rotation"] == {
+        "photos": body["photos"],
+        "apps": [
+            {"app_id": "quotes", "enabled": True, "minutes": 5},
+            {"app_id": "weather", "enabled": False, "minutes": 3},
+        ],
     }
-    assert client.get("/api/rotation").json() == body
+    assert client.get("/api/rotation").json() == out
+
+
+def test_rotation_put_partial_bodies(client: TestClient) -> None:
+    # photos only: patched key by key, the apps untouched
+    r = client.put("/api/rotation", json={"photos": {"in_a_row": 2}})
+    assert r.status_code == 200, r.text
+    assert r.json()["photos"] == {**PHOTOS_DEFAULT, "in_a_row": 2}
+    assert [a["app_id"] for a in r.json()["apps"]] == ["weather", "headlines", "quotes", "patterns"]
+    # apps only: the list is replaced whole, the photo stream untouched
+    r = client.put("/api/rotation", json={"apps": [{"app_id": "patterns", "minutes": 9}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["photos"]["in_a_row"] == 2
+    assert [(a["app_id"], a["enabled"], a["minutes"]) for a in r.json()["apps"]] == [
+        ("patterns", True, 9),
+        ("weather", False, 2),
+        ("headlines", False, 2),
+        ("quotes", False, 2),
+    ]
+    assert client.get("/api/settings").json()["rotation"]["apps"] == [
+        {"app_id": "patterns", "enabled": True, "minutes": 9}
+    ]
+    # paused alongside
+    r = client.put("/api/rotation", json={"apps": [], "paused": True})
+    assert r.status_code == 200 and r.json()["paused"] is True
+    assert client.get("/api/status").json()["rotation"]["paused"] is True
 
 
 def test_rotation_put_round_trips_the_get_shape(client: TestClient) -> None:
     body = client.get("/api/rotation").json()
-    body["slots"].reverse()
-    r = client.put("/api/rotation", json={"slots": body["slots"]})
+    body["apps"].reverse()
+    body["photos"]["order"] = "sequential"
+    r = client.put("/api/rotation", json={"photos": body["photos"], "apps": body["apps"]})
     assert r.status_code == 200, r.text
-    assert r.json()["slots"] == body["slots"]
-
-
-def test_rotation_get_round_trips_after_unknown_photos_options(client: TestClient) -> None:
-    """``/api/settings`` stores any slot options; ``GET /api/rotation`` reports
-    only the photos options the scheduler reads, so its body can be PUT back
-    (an unknown key used to come back and make the PUT a 422)."""
-    rotation = client.get("/api/settings").json()["rotation"]
-    rotation[0]["options"]["zoom"] = 2
-    r = client.put("/api/settings", json={"rotation": rotation})
-    assert r.status_code == 200, r.text
-    body = client.get("/api/rotation").json()
-    assert body["slots"][0]["options"] == {"dwell_minutes": 3, "order": "shuffle"}
-    r = client.put("/api/rotation", json={"slots": body["slots"]})
-    assert r.status_code == 200, r.text
-    assert r.json()["slots"] == body["slots"]
+    assert r.json()["apps"] == body["apps"] and r.json()["photos"] == body["photos"]
 
 
 @pytest.mark.parametrize(
     ("body", "fragment"),
     [
-        ({"slots": [{"app_id": "radio", "duration_minutes": 5}]}, "unknown app"),
-        ({"slots": [{"duration_minutes": 5}]}, "unknown app"),
+        ({"apps": [{"app_id": "radio", "minutes": 5}]}, "apps[0].app_id: unknown app 'radio'"),
+        ({"apps": [{"app_id": "weather"}, {"minutes": 5}]}, "apps[1].app_id: unknown app None"),
+        ({"apps": [{"app_id": "photos", "minutes": 5}]}, "rotation.apps[0].app_id: photos belongs"),
         (
-            {
-                "slots": [
-                    {"app_id": "photos", "duration_minutes": 5, "options": {"dwell_minutes": 0}}
-                ]
-            },
-            "dwell_minutes",
+            {"apps": [{"app_id": "weather", "minutes": 0}]},
+            "rotation.apps[0].minutes must be between 1 and 1440, got 0",
         ),
         (
-            {
-                "slots": [
-                    {"app_id": "photos", "duration_minutes": 5, "options": {"dwell_minutes": 1441}}
-                ]
-            },
-            "dwell_minutes",
+            {"apps": [{"app_id": "weather", "minutes": 3}, {"app_id": "quotes", "minutes": 1441}]},
+            "rotation.apps[1].minutes must be between 1 and 1440, got 1441",
         ),
         (
-            {
-                "slots": [
-                    {"app_id": "photos", "duration_minutes": 5, "options": {"dwell_minutes": 2.5}}
-                ]
-            },
-            "dwell_minutes",
+            {"apps": [{"app_id": "weather", "minutes": 2.5}]},
+            "rotation.apps[0].minutes must be a whole",
+        ),
+        ({"apps": [{"app_id": "weather", "enabled": "yes"}]}, "rotation.apps[0].enabled"),
+        (
+            {"apps": [{"app_id": "weather"}, {"app_id": "quotes"}, {"app_id": "weather"}]},
+            "rotation.apps[2].app_id: duplicate of rotation.apps[0]",
         ),
         (
-            {
-                "slots": [
-                    {"app_id": "photos", "duration_minutes": 5, "options": {"order": "random"}}
-                ]
-            },
-            "order",
+            {"apps": [{"app_id": "weather", "colour": 1}]},
+            "rotation.apps[0] has unknown key(s): colour",
         ),
         (
-            {"slots": [{"app_id": "photos", "duration_minutes": 5, "options": {"zoom": 2}}]},
-            "unknown key",
+            {"apps": [{"app_id": "weather", "duration_minutes": 3}]},
+            "unknown key(s): duration_minutes",
         ),
-        ({"slots": [{"app_id": "weather", "duration_minutes": 0}]}, "duration_minutes"),
-        ({"slots": [{"app_id": "weather", "duration_minutes": 3, "colour": 1}]}, "unknown key"),
-        ({"slots": [{"app_id": "weather", "duration_minutes": 3, "options": [1]}]}, "options"),
-        ({"slots": ["weather"]}, "must be an object"),
-        ({"slots": "weather"}, "must be a list"),
-        ({"slots": [], "paused": "yes"}, "paused"),
-        ({"paused": True}, "slots is required"),
-        ({"slots": [], "extra": 1}, "unknown key"),
+        ({"apps": ["weather"]}, "apps[0] must be an object"),
+        ({"apps": "weather"}, "apps must be a list"),
+        ({"photos": {"in_a_row": 0}}, "rotation.photos.in_a_row must be between 1 and 200, got 0"),
+        ({"photos": {"in_a_row": 201}}, "rotation.photos.in_a_row must be between 1 and 200"),
+        (
+            {"photos": {"minutes_each": 0}},
+            "rotation.photos.minutes_each must be between 1 and 1440",
+        ),
+        ({"photos": {"minutes_each": 2.5}}, "rotation.photos.minutes_each must be a whole number"),
+        ({"photos": {"order": "random"}}, "rotation.photos.order must be shuffle or sequential"),
+        ({"photos": {"enabled": 1}}, "rotation.photos.enabled must be true or false"),
+        ({"photos": {"dwell_minutes": 3}}, "rotation.photos has unknown key(s): dwell_minutes"),
+        ({"photos": []}, "rotation.photos must be an object"),
+        ({"apps": [], "paused": "yes"}, "paused"),
+        ({"paused": True}, "photos or apps is required"),
+        ({}, "photos or apps is required"),
+        ({"apps": [], "slots": []}, "unknown key(s): slots"),
+        ({"apps": [], "extra": 1}, "unknown key(s): extra"),
     ],
 )
 def test_rotation_put_validation(client: TestClient, body: dict[str, Any], fragment: str) -> None:
     before = client.get("/api/settings").json()
     r = client.put("/api/rotation", json=body)
     assert r.status_code == 422, r.text
-    assert fragment in r.json()["error"]
-    assert client.get("/api/settings").json() == before
+    assert fragment in r.json()["error"], r.json()["error"]
+    assert client.get("/api/settings").json() == before  # nothing stored
 
 
-def test_rotation_put_empty_list_is_allowed(client: TestClient) -> None:
-    r = client.put("/api/rotation", json={"slots": []})
-    assert r.status_code == 200 and r.json()["slots"] == []
+def test_rotation_put_no_cards_and_no_photos_is_allowed(client: TestClient) -> None:
+    r = client.put("/api/rotation", json={"photos": {"enabled": False}, "apps": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["photos"]["enabled"] is False
+    assert all(a["enabled"] is False for a in r.json()["apps"])
     rot = client.get("/api/status").json()["rotation"]
     assert rot["current"] is None and rot["next"] is None and rot["next_at"] is None
 

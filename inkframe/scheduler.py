@@ -19,7 +19,10 @@ Panel-care rules enforced here, in code (plan section 2; docs/SCHEDULER.md):
 * **R6 robustness**: a render that raises (anything, ``SystemExit``
   included) or returns an invalid frame is logged and its slot skipped
   before the panel is touched (the next enabled slot is tried a second
-  later; if every slot fails the scheduler backs off for a minute); a
+  later; if every slot fails the scheduler backs off for a minute).  A
+  broken photo is left out of the rest of its run instead, so the run still
+  shows ``in_a_row`` photos; the stream is skipped only when no other photo
+  is left to try.  A
   display failure is logged and counts as an attempt, and the panel's
   content is then treated as unknown, so the next rotation change repaints
   it even with the same image.  The thread never dies and the panel is
@@ -27,6 +30,14 @@ Panel-care rules enforced here, in code (plan section 2; docs/SCHEDULER.md):
 * **R7 persistence**: all timing anchors, the rotation position, the recent
   photos and the last frame survive a restart; a lost attempt anchor falls
   back to the last refresh, so a corrupt state row never shortens the floor.
+
+The rotation is a *cycle*: ``rotation.photos.in_a_row`` photos back to back
+(each for ``minutes_each`` minutes, however long a refresh takes), then every
+enabled card in ``rotation.apps`` once, in order, then photos again.  The
+scheduler works on a derived slot list (``_slots``): index 0 is always the
+photo stream, enabled or not, then one slot per card, so "slot" in this
+module means one of those cycle positions.  ``SchedulerState.photos_shown``
+counts the photos of the current run.
 
 Design: ``Scheduler.tick(now)`` is a pure-ish decision core (it looks at the
 state and the settings, performs at most one refresh synchronously and
@@ -79,6 +90,7 @@ from inkframe.apps.base import (
     validate_settings,
 )
 from inkframe.config import (
+    DEFAULT_PHOTO_ORDER,
     MIN_REFRESH_FLOOR_SECONDS,
     MIN_SHOW_NOW_SECONDS,
     QuietHours,
@@ -96,10 +108,6 @@ log = logging.getLogger("inkframe.scheduler")
 OFFLINE_ENV_VAR = "INKFRAME_OFFLINE"
 
 PHOTOS_APP_ID = "photos"
-PHOTO_ORDERS: tuple[str, ...] = ("shuffle", "sequential")
-DEFAULT_DWELL_MINUTES = 3
-DEFAULT_PHOTO_ORDER = "shuffle"
-MAX_DWELL_MINUTES = 24 * 60
 #: shuffle avoids the last ``min(n - 1, SHUFFLE_MEMORY)`` photos shown
 SHUFFLE_MEMORY = 20
 #: how many recent photo ids are kept in the persisted state
@@ -290,54 +298,7 @@ def quiet_window_active(qh: QuietHours, now: datetime) -> tuple[bool, datetime |
     return True, now + (best - wall)
 
 
-# --- photos slot options and order ---------------------------------------------------------
-
-
-def photo_options(options: Mapping[str, Any] | None) -> tuple[timedelta, str]:
-    """The photos slot's ``(dwell, order)``, tolerant of bad stored values
-    (they fall back to the defaults: 3 minutes, shuffle)."""
-    opts = options if isinstance(options, Mapping) else {}
-    dwell = opts.get("dwell_minutes", DEFAULT_DWELL_MINUTES)
-    if (
-        isinstance(dwell, bool)
-        or not isinstance(dwell, (int, float))
-        or dwell != dwell  # NaN
-        or not 1 <= dwell <= MAX_DWELL_MINUTES
-    ):
-        dwell = DEFAULT_DWELL_MINUTES
-    order = opts.get("order", DEFAULT_PHOTO_ORDER)
-    if not isinstance(order, str) or order not in PHOTO_ORDERS:
-        order = DEFAULT_PHOTO_ORDER
-    return timedelta(minutes=float(dwell)), order
-
-
-def validate_photo_options(options: object) -> dict[str, Any]:
-    """Strictly check a photos slot's options (API input) and return them with
-    defaults filled: ``{"dwell_minutes": 1..1440 (int), "order": "shuffle" |
-    "sequential"}``.  Raises ``ValueError`` naming the bad key."""
-    if options is None:
-        options = {}
-    if not isinstance(options, Mapping):
-        raise ValueError(f"options must be an object, got {type(options).__name__}")
-    unknown = sorted(str(k) for k in options if k not in ("dwell_minutes", "order"))
-    if unknown:
-        raise ValueError(f"options has unknown key(s): {', '.join(unknown)}")
-    dwell = options.get("dwell_minutes", DEFAULT_DWELL_MINUTES)
-    if (
-        isinstance(dwell, bool)
-        or not isinstance(dwell, (int, float))
-        or (isinstance(dwell, float) and not dwell.is_integer())
-    ):
-        raise ValueError(f"options.dwell_minutes must be a whole number of minutes, got {dwell!r}")
-    dwell = int(dwell)
-    if not 1 <= dwell <= MAX_DWELL_MINUTES:
-        raise ValueError(
-            f"options.dwell_minutes must be between 1 and {MAX_DWELL_MINUTES}, got {dwell}"
-        )
-    order = options.get("order", DEFAULT_PHOTO_ORDER)
-    if not isinstance(order, str) or order not in PHOTO_ORDERS:
-        raise ValueError(f"options.order must be one of {', '.join(PHOTO_ORDERS)}, got {order!r}")
-    return {"dwell_minutes": dwell, "order": order}
+# --- photo order ---------------------------------------------------------------------------
 
 
 def pick_next_photo(
@@ -462,7 +423,8 @@ class SchedulerState:
     Times are aware datetimes in memory and ISO-8601 UTC strings on disk.
     """
 
-    #: index into ``settings.rotation`` (all slots, enabled or not)
+    #: index into the derived slot list (``_slots``: the photo stream, then
+    #: one slot per card, enabled or not)
     slot_index: int = 0
     #: app id of that slot when it started, to follow it through rotation edits
     slot_app_id: str | None = None
@@ -471,6 +433,9 @@ class SchedulerState:
     #: the photo the photos slot is showing (None: none, or not a photos slot)
     photo_id: str | None = None
     photo_started_at: datetime | None = None
+    #: photos shown in the current photo run (the "no photos" card and a
+    #: silent repeat of the same photo count too); 1 when the run starts
+    photos_shown: int = 0
     #: photo ids in the order they were picked (shown or failed), newest last
     recent_photo_ids: list[str] = field(default_factory=list)
     #: the shuffle pick reserved for the next photo (so "next" is stable)
@@ -512,6 +477,9 @@ class SchedulerState:
         idx = data.get("slot_index")
         if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
             st.slot_index = idx
+        shown = data.get("photos_shown")
+        if isinstance(shown, int) and not isinstance(shown, bool) and shown >= 0:
+            st.photos_shown = shown
         for name in ("slot_app_id", "photo_id", "next_photo_id"):
             v = data.get(name)
             if isinstance(v, str) and v:
@@ -575,6 +543,30 @@ class _RotationPlan:
     due_at: datetime
     item: _Item
     reason: str
+
+
+@dataclass(frozen=True)
+class _Slot:
+    """One cycle position: the photo stream (index 0) or one card.
+
+    ``minutes`` is per photo for the stream and per visit for a card;
+    ``in_a_row`` and ``order`` are set for the stream only.
+    """
+
+    app_id: str
+    enabled: bool
+    minutes: int
+    in_a_row: int = 1
+    order: str = DEFAULT_PHOTO_ORDER
+
+
+def _slots(settings: Settings) -> tuple[_Slot, ...]:
+    """The cycle as a slot list: index 0 is ALWAYS the photo stream (even
+    when disabled, so a persisted ``slot_index`` stays meaningful), then one
+    slot per ``AppTurn`` in order."""
+    ph = settings.rotation.photos
+    stream = _Slot(PHOTOS_APP_ID, ph.enabled, ph.minutes_each, ph.in_a_row, ph.order)
+    return (stream, *(_Slot(t.app_id, t.enabled, t.minutes) for t in settings.rotation.apps))
 
 
 @dataclass(frozen=True)
@@ -642,6 +634,9 @@ class Scheduler:
 
         self._pending: _Pending | None = None
         self._failed_slots: set[int] = set()
+        #: photos that failed to render in the current photo run (R6 inside
+        #: the stream: the run walks past them instead of ending)
+        self._failed_photo_ids: set[str] = set()
         self._backoff_until: datetime | None = None
         self._clock_ref: tuple[datetime, float] | None = None
         self._last_frame: np.ndarray | None = None
@@ -997,13 +992,13 @@ class Scheduler:
 
     def _enabled_indices(self, settings: Settings) -> list[int]:
         out = []
-        for i, slot in enumerate(settings.rotation):
+        for i, slot in enumerate(_slots(settings)):
             if not slot.enabled:
                 continue
             if slot.app_id not in self._apps:
                 if slot.app_id not in self._warned_unknown:
                     self._warned_unknown.add(slot.app_id)
-                    log.warning("rotation slot %d: unknown app %r is skipped", i, slot.app_id)
+                    log.warning("rotation: unknown app %r is skipped", slot.app_id)
                 continue
             out.append(i)
         return out
@@ -1022,7 +1017,7 @@ class Scheduler:
         """``(slot index, fresh)`` for the current rotation position, following
         rotation edits; ``fresh`` means the slot has not shown its first frame.
         None when no slot is enabled.  Pure."""
-        rot = settings.rotation
+        rot = _slots(settings)
         enabled = self._enabled_indices(settings)
         if not enabled:
             return None
@@ -1066,6 +1061,17 @@ class Scheduler:
             "the photo list", lambda: self._db.list_photos(include_excluded=False), None
         )
 
+    def _photos_to_try(self) -> list[Photo] | None:
+        """The included photos without those that failed to render in this
+        run (``_failed_photo_ids``), so a broken photo is not picked again
+        until the next run; the unfiltered list when nothing else is left.
+        None when the list cannot be read."""
+        photos = self._included_photos()
+        if photos is None or not self._failed_photo_ids:
+            return photos
+        rest = [p for p in photos if p.id not in self._failed_photo_ids]
+        return rest or photos
+
     def _photo_list_error(self) -> str:
         why = self._db_failing.get("the photo list", "unknown error")
         return f"cannot read the photo list ({why})"
@@ -1090,14 +1096,15 @@ class Scheduler:
         return photo
 
     def _entry_item(self, idx: int, settings: Settings) -> _Item:
-        """What a new visit of slot ``idx`` shows first."""
-        slot = settings.rotation[idx]
+        """What a new visit of slot ``idx`` shows first: a card, or the first
+        photo of a new run (a fresh pick, so a run that follows itself does
+        not have to change the picture; one photo is then a silent repeat)."""
+        slot = _slots(settings)[idx]
         if slot.app_id == PHOTOS_APP_ID:
-            _, order = photo_options(slot.options)
-            photos = self._included_photos()
+            photos = self._photos_to_try()
             if photos is None:  # fails like a render, so the slot is skipped (R6)
                 return _Item(idx, PHOTOS_APP_ID, None, "enter", error=self._photo_list_error())
-            photo = self._peek_photo(photos, order, current=None)
+            photo = self._peek_photo(photos, slot.order, current=None)
             return _Item(idx, PHOTOS_APP_ID, photo, "enter")
         return _Item(idx, slot.app_id, None, "enter")
 
@@ -1106,8 +1113,20 @@ class Scheduler:
     ) -> _RotationPlan | None:
         """When the rotation wants its next change and what it shows then,
         ignoring pause, quiet hours, backoff and the floor (the caller applies
-        those, except that a photo change which the floor would push past the
-        slot's end is not planned).  None when no slot is enabled."""
+        those).  None when no slot is enabled.
+
+        A card ends ``minutes`` after it started.  The photo stream changes
+        its photo every ``minutes_each`` (counted from the photo's own start,
+        so a photo the floor delayed still gets its full time) until
+        ``in_a_row`` photos have been shown, then the next enabled slot is
+        entered, which is the stream itself when no card is enabled.  The run
+        has no fixed end: a refresh that takes 19 s, or a floor that delays a
+        change, never costs a photo, and neither does a photo that fails to
+        render (it is left out for the rest of the run, see
+        ``_skip_after_failure``).  The "no photos" card lasts one dwell; a
+        photo list that cannot be read keeps the photo on the panel until
+        its dwell ends, then moves on.
+        """
         resolved = self._resolve_slot(settings)
         if resolved is None:
             return None
@@ -1115,32 +1134,26 @@ class Scheduler:
         st = self._state
         if fresh or st.slot_started_at is None:
             return _RotationPlan(now, self._entry_item(idx, settings), "slot has not shown yet")
-        slot = settings.rotation[idx]
-        slot_end = st.slot_started_at + timedelta(minutes=slot.duration_minutes)
-        if slot.app_id == PHOTOS_APP_ID:
-            dwell, order = photo_options(slot.options)
-            # None (unreadable): no photo change; the photo on the panel stays
-            # until the slot ends
-            photos = self._included_photos()
-            change_at = (st.photo_started_at or st.slot_started_at) + dwell
-            if photos is not None and not photos:
-                # the "no photos" card lasts one dwell, then the rotation moves on
-                nxt = self._next_enabled(settings, idx)
-                assert nxt is not None
-                end = min(slot_end, change_at)
-                return _RotationPlan(end, self._entry_item(nxt, settings), "photos: none to show")
-            if photos is not None and any(p.id != st.photo_id for p in photos):
-                floor_at = self._floor_at(settings, now, mono)
-                earliest = change_at if floor_at is None else max(change_at, floor_at)
-                # a photo change that would push the slot past its end (the
-                # next refresh cannot come before the floor) is skipped
-                if earliest + timedelta(seconds=self._floor_seconds(settings)) <= slot_end:
-                    photo = self._peek_photo(photos, order, current=st.photo_id)
-                    item = _Item(idx, PHOTOS_APP_ID, photo, "photo")
-                    return _RotationPlan(change_at, item, "photos: dwell elapsed")
+        slot = _slots(settings)[idx]
         nxt = self._next_enabled(settings, idx)
         assert nxt is not None
-        return _RotationPlan(slot_end, self._entry_item(nxt, settings), "slot duration elapsed")
+        if slot.app_id != PHOTOS_APP_ID:
+            end = st.slot_started_at + timedelta(minutes=slot.minutes)
+            return _RotationPlan(end, self._entry_item(nxt, settings), "card time elapsed")
+        change_at = (st.photo_started_at or st.slot_started_at) + timedelta(minutes=slot.minutes)
+        photos = self._photos_to_try()
+        if photos is None:
+            reason = "photos: list unreadable"
+            return _RotationPlan(change_at, self._entry_item(nxt, settings), reason)
+        if not photos:
+            return _RotationPlan(change_at, self._entry_item(nxt, settings), "photos: none to show")
+        in_a_row = slot.in_a_row
+        if st.photos_shown >= in_a_row:
+            reason = f"photos: {in_a_row} in a row shown"
+            return _RotationPlan(change_at, self._entry_item(nxt, settings), reason)
+        photo = self._peek_photo(photos, slot.order, current=st.photo_id)
+        item = _Item(idx, PHOTOS_APP_ID, photo, "photo")
+        return _RotationPlan(change_at, item, f"photos: {st.photos_shown + 1} of {in_a_row}")
 
     def _keepalive_item(self, settings: Settings) -> _Item | None:
         """What a keep-alive renders when no last frame exists: the current
@@ -1157,37 +1170,42 @@ class Scheduler:
         st = self._state
         if fresh or st.slot_started_at is None:
             return self._entry_item(idx, settings)
-        slot = settings.rotation[idx]
+        slot = _slots(settings)[idx]
         if slot.app_id == PHOTOS_APP_ID:
             photo = self._photo_by_id(st.photo_id) if st.photo_id else None
             if photo is not None:
                 return _Item(idx, PHOTOS_APP_ID, photo, "keep")
-            photos = self._included_photos()
+            photos = self._photos_to_try()
             if photos is None:  # fails like a render, so the keep-alive walks on (R6)
                 return _Item(idx, PHOTOS_APP_ID, None, "keep", error=self._photo_list_error())
-            _, order = photo_options(slot.options)
-            nxt = self._peek_photo(photos, order, current=None)
+            nxt = self._peek_photo(photos, slot.order, current=None)
             return _Item(idx, PHOTOS_APP_ID, nxt, "photo" if nxt is not None else "keep")
         return _Item(idx, slot.app_id, None, "keep")
 
     def _find_slot(self, settings: Settings, app_id: str, current: int | None) -> int | None:
         """The enabled slot of ``app_id`` nearest at/after ``current`` (cyclic)."""
-        matches = [
-            i for i in self._enabled_indices(settings) if settings.rotation[i].app_id == app_id
-        ]
+        slots = _slots(settings)
+        matches = [i for i in self._enabled_indices(settings) if slots[i].app_id == app_id]
         if not matches:
             return None
         if current is None:
             return matches[0]
-        n = len(settings.rotation)
-        return min(matches, key=lambda i: (i - current) % n)
+        return min(matches, key=lambda i: (i - current) % len(slots))
 
     def _pending_item(
         self, req: _Pending, now: datetime, mono: float, settings: Settings
     ) -> _Item | None:
         """Translate a show-now request into an item.  Showing something that
         has a slot jumps the rotation there; anything else is shown without
-        touching the rotation timing."""
+        touching the rotation timing.
+
+        ``next`` shows what the rotation plans next: inside a photo run the
+        next photo, after it the first card.  A chosen photo (``photo``)
+        enters the photo stream and restarts the run (``photos_shown`` becomes
+        1), also when the stream is already running; a show-now of the photos
+        *app* inside a running stream is a photo change that counts towards
+        the run, like ``next``.  A card that is already showing keeps its
+        timing."""
         if req.kind == "next":
             rp = self._rotation_plan(now, mono, settings)
             return rp.item if rp is not None else None
@@ -1205,11 +1223,7 @@ class Scheduler:
             if photo is None:
                 return None
         elif app_id == PHOTOS_APP_ID:
-            order = (
-                photo_options(settings.rotation[target].options)[1]
-                if target is not None
-                else DEFAULT_PHOTO_ORDER
-            )
+            order = _slots(settings)[target].order if target is not None else DEFAULT_PHOTO_ORDER
             photos = self._included_photos()
             if photos is None:
                 error = self._photo_list_error()
@@ -1218,7 +1232,7 @@ class Scheduler:
         variant = req.variant if req.kind == "app" else None
         if target is None:
             return _Item(None, app_id, photo, "keep", error, variant)
-        if target == cur and cur_started:
+        if target == cur and cur_started and req.kind != "photo":
             mode = "photo" if photo is not None else "keep"
             return _Item(target, app_id, photo, mode, error, variant)
         return _Item(target, app_id, photo, "enter", error, variant)
@@ -1535,6 +1549,10 @@ class Scheduler:
     def _mark_shown(
         self, item: _Item, at: datetime, source: dict[str, Any], settings: Settings
     ) -> None:
+        """Record that ``item`` is on the panel (also for a silent repeat of
+        the photo already there).  Entering the photo stream starts a run
+        (``photos_shown`` 1); a photo change counts one more; entering a card
+        leaves the count alone, since the next run resets it anyway."""
         st = self._state
         if item.mode == "enter" and item.slot_index is not None:
             st.slot_index = item.slot_index
@@ -1543,16 +1561,20 @@ class Scheduler:
             if item.app_id == PHOTOS_APP_ID:
                 st.photo_id = item.photo.id if item.photo is not None else None
                 st.photo_started_at = at
+                st.photos_shown = 1
             else:
                 st.photo_id = None
                 st.photo_started_at = None
         elif item.mode == "photo":
             st.photo_id = item.photo.id if item.photo is not None else None
             st.photo_started_at = at
+            st.photos_shown += 1
         if item.photo is not None:
             self._remember_photo(item.photo.id)
         st.showing = {k: source[k] for k in ("type", "id", "label")}
         self._failed_slots.clear()
+        if item.mode == "enter":
+            self._failed_photo_ids.clear()  # a new visit retries every photo
 
     def _remember_photo(self, photo_id: str) -> None:
         st = self._state
@@ -1560,9 +1582,27 @@ class Scheduler:
         del st.recent_photo_ids[:-RECENT_PHOTOS_KEPT]
         st.next_photo_id = None
 
+    def _more_photos_to_try(self, failed_id: str) -> bool:
+        """Record ``failed_id`` as broken for this run; True when an included
+        photo that has not failed in this run remains (the one on the panel
+        counts: it then repeats silently, as with a single photo)."""
+        self._failed_photo_ids.add(failed_id)
+        photos = self._included_photos()
+        if not photos:
+            return False
+        return any(p.id not in self._failed_photo_ids for p in photos)
+
     def _skip_after_failure(self, item: _Item, now: datetime, settings: Settings) -> float:
         """R6: skip the failed slot for this pass and point the rotation at the
         next enabled one; back off when every enabled slot failed.
+
+        A photo that fails inside the stream (entering it, or a photo change)
+        does not end the run: the run is a count of photos that showed, so
+        the photo is left out for the rest of the run and the next tick picks
+        another one (the change is due already).  The stream is skipped like
+        any slot only when no other included photo is left to try (the list
+        is unreadable, empty, or every photo in it failed in this run), so an
+        all-broken library backs off instead of spinning.
 
         This also runs for a keep-alive that had to render (there was no last
         frame) and failed, even while paused or in quiet hours: it is the one
@@ -1572,6 +1612,9 @@ class Scheduler:
         st = self._state
         if item.photo is not None:
             self._remember_photo(item.photo.id)  # the walk moves past a broken photo
+            if item.mode in ("enter", "photo") and self._more_photos_to_try(item.photo.id):
+                return RETRY_DELAY
+            self._failed_photo_ids.clear()
         if item.slot_index is None:
             return RETRY_DELAY
         self._failed_slots.add(item.slot_index)
@@ -1590,7 +1633,7 @@ class Scheduler:
             delay = RETRY_DELAY
         if nxt is not None:
             st.slot_index = nxt
-            st.slot_app_id = settings.rotation[nxt].app_id
+            st.slot_app_id = _slots(settings)[nxt].app_id
             st.slot_started_at = None
         return delay
 
@@ -1607,7 +1650,7 @@ class Scheduler:
         resolved = self._resolve_slot(settings)
         if resolved is not None:
             idx, fresh = resolved
-            app_id = settings.rotation[idx].app_id
+            app_id = _slots(settings)[idx].app_id
             if (idx, app_id) != (st.slot_index, st.slot_app_id) or (
                 fresh and st.slot_started_at is not None
             ):
@@ -1787,21 +1830,32 @@ class Scheduler:
         }
 
     def _current_info(self, settings: Settings) -> dict[str, Any] | None:
+        """``/api/status`` ``rotation.current``.  ``ends_at`` is exact for a
+        card (``slot_started_at + minutes``) and an estimate for the photo
+        stream: the photos still to come in this run, one dwell each, from
+        the current photo's start (``dwell * max(1, in_a_row - photos_shown
+        + 1)``); the "no photos" card lasts one dwell."""
         resolved = self._resolve_slot(settings)
         st = self._state
         if resolved is None or resolved[1] or st.slot_started_at is None:
             return None
         idx = resolved[0]
-        slot = settings.rotation[idx]
+        slot = _slots(settings)[idx]
         photo = None
-        if slot.app_id == PHOTOS_APP_ID and st.photo_id:
-            photo = self._photo_by_id(st.photo_id)
+        if slot.app_id == PHOTOS_APP_ID:
+            if st.photo_id:
+                photo = self._photo_by_id(st.photo_id)
+            dwell = timedelta(minutes=slot.minutes)
+            left = 1 if st.photo_id is None else max(1, slot.in_a_row - st.photos_shown + 1)
+            ends_at = (st.photo_started_at or st.slot_started_at) + dwell * left
+        else:
+            ends_at = st.slot_started_at + timedelta(minutes=slot.minutes)
         return {
             "app_id": slot.app_id,
             "label": self._label(slot.app_id, photo),
             "photo_id": st.photo_id if slot.app_id == PHOTOS_APP_ID else None,
             "started_at": iso(st.slot_started_at),
-            "ends_at": iso(st.slot_started_at + timedelta(minutes=slot.duration_minutes)),
+            "ends_at": iso(ends_at),
         }
 
     def _pending_info(
@@ -1956,9 +2010,11 @@ class Scheduler:
         if st.created_at is None:
             st.created_at = now
             self._live.add("created_at")
-        settings = self._store.get()
-        n = len(settings.rotation)
-        st.slot_index = min(st.slot_index, n - 1) if n else 0
+        # the position of a frame upgraded from the 0.1 slot list resolves by
+        # app id against the new list on the first tick (``_normalise``);
+        # here the index is only kept in range
+        n = len(_slots(self._store.get()))
+        st.slot_index = min(st.slot_index, n - 1)
         for name in ("photo_id", "next_photo_id"):
             pid = getattr(st, name)
             # an unreadable photo row is kept (it may be readable later)
@@ -1972,9 +2028,10 @@ class Scheduler:
         self._clamp_future(now)
         self._save()
         log.info(
-            "scheduler state: slot %d (%s), last refresh %s",
+            "scheduler state: slot %d (%s), %d photo(s) shown in this run, last refresh %s",
             st.slot_index,
             st.slot_app_id or "-",
+            st.photos_shown,
             iso(st.last_refresh_at) or "never",
         )
         return st

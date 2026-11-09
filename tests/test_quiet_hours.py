@@ -11,7 +11,7 @@ import pytest
 
 from inkframe.config import QuietHours
 from inkframe.scheduler import MAX_DELAY, iso, quiet_window_active
-from tests.conftest import TZ, FakeClock, at, slot
+from tests.conftest import TZ, FakeClock, at, rotation, turn
 
 ALL_DAYS = (0, 1, 2, 3, 4, 5, 6)
 NIGHT = QuietHours(enabled=True, start="23:00", end="07:00", days=ALL_DAYS)
@@ -97,7 +97,7 @@ def test_window_across_a_dst_change() -> None:
 QUIET = {
     "panel": {"refresh_floor_seconds": 30, "show_now_min_seconds": 30, "keepalive_hours": 20},
     "quiet_hours": {"enabled": True, "start": "23:00", "end": "07:00", "days": list(ALL_DAYS)},
-    "rotation": [slot("alpha", 1), slot("beta", 1), slot("gamma", 1)],
+    "rotation": rotation([turn("alpha", 1), turn("beta", 1), turn("gamma", 1)]),
 }
 
 
@@ -155,7 +155,7 @@ def test_keepalive_during_quiet_hours_reshows_last_frame(make_rig) -> None:
     settings = {
         **QUIET,
         "panel": {**QUIET["panel"], "keepalive_hours": 2},
-        "rotation": [slot("alpha", 10), slot("beta", 10), slot("gamma", 10)],
+        "rotation": rotation([turn("alpha", 10), turn("beta", 10), turn("gamma", 10)]),
     }
     rig = make_rig(settings, clock=FakeClock(at(19, 22, 58)))
     rig.tick()
